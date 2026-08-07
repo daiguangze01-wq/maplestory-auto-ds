@@ -27,11 +27,12 @@ minimap:
   player_tolerance: 8            # 颜色容差起始值（会自动扩大到+30）
 
 monster_detect:
-  monsters: ["black_axe_stump"]
+  monsters: ["Stump"]
+  # monsters: ["black_axe_stump"]
   # monsters: ["OrangeMushroom2"]
   mode: "color"                     # color / grayscale / contour_only
   diff_thres: 0.18                  # 匹配阈值 0.0~1.0（越小越严格）
-  scales: [1.1]                 # 缩放比例数组 [0.5~1.5]，素材不匹配时加多个: [0.8, 1.0, 1.2]
+  scales: [1.2]                 # 缩放比例数组 [0.5~1.5]，素材不匹配时加多个: [0.8, 1.0, 1.2]
   display_scale: 0.47               # 监视器缩放 0.1~1.0（越小越流畅）
   detection_interval: 2             # 每N帧检测一次 1~5（1=每帧，越大越流畅）
 
@@ -50,7 +51,7 @@ health_monitor:
   bar_min_area: 500                # 放宽面积范围
   bar_max_area: 12000
   add_hp_percent: 50
-  add_mp_percent: 50
+  add_mp_percent: 10
 
 ui_coords:
   ui_y_start: 610                   # 根据实际游戏窗口调整：底部UI栏Y起点
