@@ -25,7 +25,7 @@ import cv2
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.utils.logger import logger
-from src.utils.common import load_yaml, override_cfg, is_mac, is_windows
+from src.utils.common import load_yaml, override_cfg, is_mac
 from src.engine.MonsterDetector import MonsterDetector
 
 
@@ -126,22 +126,28 @@ def main():
     # -------------------------------------------------------------------
     win_name = "NewMaple"
     window_positioned = False
-    scale = cfg["monster_detect"].get("display_scale", 0.55)
+    last_frame_seq = -1
+    t_last_display = time.time()
 
     try:
         while not detector.is_terminated:
             # Show debug image — only when a new frame is ready
             # (exact same pattern as reference: MapleStoryAutoLevelUp.py:1851-1864)
-            if detector.is_frame_done:
+            if detector.is_frame_done and detector.frame_seq != last_frame_seq:
                 if detector.img_display is not None:
                     cv2.imshow(win_name, detector.img_display)
+                    now = time.time()
+                    detector.display_fps = round(1.0 / max(now - t_last_display, 0.001))
+                    t_last_display = now
+                    last_frame_seq = detector.frame_seq
 
                     if not window_positioned:
                         try:
                             import ctypes
                             user32 = ctypes.windll.user32
-                            screen_w = user32.GetSystemMetrics(0)
-                            screen_h = user32.GetSystemMetrics(1)
+                            get_system_metrics = getattr(user32, "GetSystemMetrics")
+                            screen_w = get_system_metrics(0)
+                            screen_h = get_system_metrics(1)
                             rect = cv2.getWindowImageRect(win_name)
                             if rect:
                                 _, _, win_w, win_h = rect
@@ -152,7 +158,7 @@ def main():
                         except Exception:
                             pass
 
-            key = cv2.waitKey(5) & 0xFF
+            key = cv2.waitKey(1) & 0xFF
             if key == ord('q') or key == 27:
                 logger.info("Quit key pressed.")
                 detector.is_terminated = True
@@ -161,7 +167,7 @@ def main():
                 screenshot(detector.img_display, "detection")
                 logger.info("Screenshot saved.")
 
-            time.sleep(0.01)
+            # No extra fixed sleep: let waitKey pump events smoothly.
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")

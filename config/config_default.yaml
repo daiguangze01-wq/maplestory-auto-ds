@@ -141,6 +141,10 @@ health_monitor:
   force_heal: false                # 优先回血（暂停攻击直到血量恢复）
   add_hp_percent: 50               # HP 低于此百分比就喝药 [0-100]
   add_mp_percent: 10               # MP 低于此百分比就喝药 [0-100]
+  hp_rearm_percent: 55             # 回到该值以上才视为本轮回血完成
+  mp_rearm_percent: 15             # 回到该值以上才视为本轮回蓝完成
+  hp_retry_timeout: 2.0            # 持续低血时，超时后允许再喝一瓶
+  mp_retry_timeout: 1.5            # 持续低蓝时，超时后允许再喝一瓶
   add_hp_cooldown: 0.5             # 喝 HP 药水冷却时间（秒）
   add_mp_cooldown: 0.5             # 喝 MP 药水冷却时间（秒）
   fps_limit: 20                    # 监控线程 FPS

@@ -1,4 +1,6 @@
 bot:
+  mode: "detect" # detect = 只检测不攻击, hunt
+  attack: "directional"
   map: "she_sheou_1"
   enable_route: true
 
@@ -6,6 +8,7 @@ system:
   fps_limit_main: 15
 
 key:
+  directional_attack: "x"
   add_hp: "end"
   add_mp: "home"
 
@@ -27,12 +30,12 @@ minimap:
   player_tolerance: 8            # 颜色容差起始值（会自动扩大到+30）
 
 monster_detect:
-  monsters: ["Stump"]
+  monsters: ["ci_mo_gu"]
   # monsters: ["black_axe_stump"]
   # monsters: ["OrangeMushroom2"]
   mode: "color"                     # color / grayscale / contour_only
-  diff_thres: 0.18                  # 匹配阈值 0.0~1.0（越小越严格）
-  scales: [1.2]                 # 缩放比例数组 [0.5~1.5]，素材不匹配时加多个: [0.8, 1.0, 1.2]
+  diff_thres: 0.28                  # 匹配阈值 0.0~1.0（越小越严格）
+  scales: [1.3]                 # 缩放比例数组 [0.5~1.5]，素材不匹配时加多个: [0.8, 1.0, 1.2]
   display_scale: 0.47               # 监视器缩放 0.1~1.0（越小越流畅）
   detection_interval: 2             # 每N帧检测一次 1~5（1=每帧，越大越流畅）
 
@@ -50,8 +53,16 @@ health_monitor:
   bar_max_aspect: 15.0
   bar_min_area: 500                # 放宽面积范围
   bar_max_area: 12000
+  bar_min_width: 110               # 过滤掉过窄/过宽的白框（防止识别到其他UI）
+  bar_max_width: 180
+  bar_min_height: 16
+  bar_max_height: 24
   add_hp_percent: 50
   add_mp_percent: 10
+  hp_rearm_percent: 54          # 回到该值以上才视为本轮回血完成
+  mp_rearm_percent: 12          # 回到该值以上才视为本轮回蓝完成
+  hp_retry_timeout: 2.0         # 持续低血时，2秒后允许再喝一瓶
+  mp_retry_timeout: 1.5         # 持续低蓝时，1.5秒后允许再喝一瓶
 
 ui_coords:
   ui_y_start: 610                   # 根据实际游戏窗口调整：底部UI栏Y起点

@@ -104,6 +104,8 @@ class MonsterDetector:
         self.t_last_frame = time.time()
         self.frame_count = 0
         self.fps = 0
+        self.display_fps = 0
+        self.frame_seq = 0
         self.best_score = 1.0       # Best (lowest) match score this frame
 
         # Flags
@@ -566,36 +568,71 @@ class MonsterDetector:
             (255, 255, 0), "Search", thickness=2, text_height=0.5
         )
 
+    def _fallback_player_location(self):
+        """Keep last valid player position, or fall back to frame center."""
+        if self.loc_player != (0, 0):
+            return
+        h, w = self.img_frame.shape[:2]
+        self.loc_player = (w // 2, h // 2)
+
     def _detect_player_by_title(self):
         """Detect player location by matching the title template (at character feet)."""
         if self.img_title is None:
-            h, w = self.img_frame.shape[:2]
-            self.loc_player = (w // 2, h // 2)
+            self._fallback_player_location()
             return
 
-        h, w = self.img_frame.shape[:2]
         title_cfg = self.cfg.get("title", {})
+        if not title_cfg.get("enable", True):
+            self._fallback_player_location()
+            return
+
         title_offset = title_cfg.get("offset", [0, -60])
+        if not isinstance(title_offset, (list, tuple)) or len(title_offset) < 2:
+            title_offset = [0, -60]
 
-        # White-mask binarization: extract only bright pixels from template + frame
-        # (参考项目 nametag white_mask 模式，对文字类模板更准)
-        lower_white = title_cfg.get("white_lower", 150)
-        upper_white = title_cfg.get("white_upper", 255)
-        img_nametag_bin = cv2.inRange(self.img_title_gray, lower_white, upper_white)
-        img_roi_bin = cv2.inRange(self.img_frame_gray, lower_white, upper_white)
+        lower_white = int(title_cfg.get("white_lower", 150))
+        upper_white = int(title_cfg.get("white_upper", 255))
+        lower_white = max(0, min(255, lower_white))
+        upper_white = max(lower_white, min(255, upper_white))
 
-        # Gaussian blur to soften edges
-        blur_k = title_cfg.get("blur_kernel", 3)
-        img_nametag_bin = cv2.GaussianBlur(img_nametag_bin, (blur_k, blur_k), 0)
-        img_roi_bin = cv2.GaussianBlur(img_roi_bin, (blur_k, blur_k), 0)
+        blur_k_raw = title_cfg.get("blur_kernel", 3)
+        try:
+            blur_k = int(blur_k_raw)
+        except (TypeError, ValueError):
+            blur_k = 3
+        blur_k = max(1, blur_k)
+        if blur_k % 2 == 0:
+            blur_k += 1
 
-        # Match binary masks
-        match_threshold = title_cfg.get("match_threshold", 0.3)
-        loc, score, is_cached = find_pattern_sqdiff(
-            img_roi_bin, img_nametag_bin,
-            last_result=self.loc_title,
-            global_threshold=match_threshold
-        )
+        match_threshold = float(title_cfg.get("match_threshold", 0.3))
+
+        try:
+            # White-mask binarization: extract only bright pixels from template + frame
+            # (参考项目 nametag white_mask 模式，对文字类模板更准)
+            img_nametag_bin = cv2.inRange(self.img_title_gray, lower_white, upper_white)
+            img_roi_bin = cv2.inRange(self.img_frame_gray, lower_white, upper_white)
+
+            # Gaussian blur to soften edges
+            img_nametag_bin = cv2.GaussianBlur(img_nametag_bin, (blur_k, blur_k), 0)
+            img_roi_bin = cv2.GaussianBlur(img_roi_bin, (blur_k, blur_k), 0)
+
+            # Match binary masks
+            loc, score, is_cached = find_pattern_sqdiff(
+                img_roi_bin, img_nametag_bin,
+                last_result=self.loc_title,
+                global_threshold=match_threshold
+            )
+        except cv2.error as e:
+            logger.warning(
+                f"[Title] OpenCV error, skip frame: {e}. "
+                f"blur_kernel={blur_k}, white=({lower_white},{upper_white})"
+            )
+            self._fallback_player_location()
+            return
+        except Exception as e:
+            logger.warning(f"[Title] Detection error, skip frame: {e}")
+            self._fallback_player_location()
+            return
 
         # Log score every frame for first 100 frames, then every 30 frames
         if self.frame_count <= 100 or self.frame_count % 30 == 0:
@@ -619,8 +656,7 @@ class MonsterDetector:
                     f"TITLE {score:.2f}", thickness=3, text_height=0.7
                 )
         elif self.loc_title is None:
-            h, w = self.img_frame.shape[:2]
-            self.loc_player = (w // 2, h // 2)
+            self._fallback_player_location()
 
     def _detect_minimap(self):
         """
@@ -809,9 +845,31 @@ class MonsterDetector:
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2
         )
 
+    def _get_attack_facing(self) -> str:
+        """Return left/right facing toward the nearest detected monster."""
+        if not self.monsters:
+            return "none"
+
+        px, _ = self.loc_player
+        nearest_dx = None
+        for m in self.monsters:
+            mx, _ = m.get("position", (0, 0))
+            mh, mw = m.get("size", (0, 0))
+            cx = mx + (mw // 2)
+            dx = cx - px
+            if nearest_dx is None or abs(dx) < abs(nearest_dx):
+                nearest_dx = dx
+
+        if nearest_dx is None:
+            return "none"
+
+        deadzone = int(self.cfg.get("directional_attack", {}).get("face_deadzone_px", 8))
+        if abs(nearest_dx) <= deadzone:
+            return "none"
+        return "right" if nearest_dx > 0 else "left"
+
     def _update_debug_overlay(self):
         """Add FPS, HP/MP/EXP, and status info to the debug frame."""
-        self.fps = round(1.0 / max(time.time() - self.t_last_frame, 0.001))
 
         # --- HP / MP / EXP display (top-right) ---
         if self.health_monitor is not None:
@@ -860,7 +918,7 @@ class MonsterDetector:
         diff_thres = self.cfg["monster_detect"]["diff_thres"]
         route_on = self.cfg["bot"].get("enable_route", False)
         texts = [
-            f"FPS: {self.fps} | KB: {'ON' if self._kb and self._kb.is_enable else 'OFF'}",
+            f"FPS(P/D): {self.fps}/{self.display_fps} | KB: {'ON' if self._kb and self._kb.is_enable else 'OFF'}",
             f"Monsters: {len(self.monsters)} | Best: {self.best_score:.4f}/{diff_thres}",
             f"Mode: {self.cfg['monster_detect']['mode']} | Scale: {self.cfg.get('monster_detect',{}).get('display_scale',1)}",
             f"Frame: {self.img_frame.shape[1]}x{self.img_frame.shape[0]}",
@@ -971,6 +1029,7 @@ class MonsterDetector:
                 self.get_player_global_position()
 
         # Route following
+        route_action = "none"
         if self.cfg["bot"].get("enable_route") and self.img_route is not None:
             # Ladder detection
             prev = getattr(self, '_prev_loc', None)
@@ -986,10 +1045,7 @@ class MonsterDetector:
             self._prev_loc = self.loc_player
 
             self.update_cmd_by_route()
-            if self._kb:
-                self._kb.set_command(
-                    f"{self.cmd_move_x} {self.cmd_move_y} {self.cmd_action}"
-                )
+            route_action = self.cmd_action
 
         # Detect player via title template matching
         self._detect_player_by_title()
@@ -1025,6 +1081,26 @@ class MonsterDetector:
                 logger.debug(
                     f"Detected {len(self.monsters)} monsters: {names}"
                 )
+
+        # Dispatch movement/action command after detection so attack can react this frame.
+        if self._kb:
+            move_x, move_y = "none", "none"
+            action = "none"
+
+            if self.cfg["bot"].get("enable_route") and self.img_route is not None:
+                move_x, move_y = self.cmd_move_x, self.cmd_move_y
+                action = route_action
+
+            # Attack switch: only enabled in hunt mode.
+            mode = self.cfg.get("bot", {}).get("mode", "detect")
+            if mode == "hunt" and self.monsters and action in ("none", "stop"):
+                action = "attack"
+                if self.cfg.get("bot", {}).get("attack", "directional") == "directional":
+                    facing = self._get_attack_facing()
+                    if facing in ("left", "right"):
+                        move_x = facing
+
+            self._kb.set_command(f"{move_x} {move_y} {action}")
 
         # Always draw decorations on debug frame
         if self.is_show_debug:
@@ -1099,8 +1175,8 @@ class MonsterDetector:
             else:
                 self.img_display = self.img_frame_debug
 
-        # Update FPS timer
-        self.t_last_frame = time.time()
+            # Signal a new renderable frame for the UI thread.
+            self.frame_seq += 1
 
         self.is_frame_done = True
         return 0
@@ -1135,13 +1211,21 @@ class MonsterDetector:
             t_start = time.time()
 
             # Process one frame (capture + optional detection)
-            self.run_once()
+            try:
+                self.run_once()
+            except Exception as e:
+                logger.error(f"[MonsterDetector] Frame processing error: {e}")
+                continue
 
             # Cap FPS (matches reference project pattern)
             frame_duration = time.time() - t_start
             target_duration = 1.0 / self.cfg["system"]["fps_limit_main"]
             if frame_duration < target_duration:
                 time.sleep(target_duration - frame_duration)
+
+            # FPS shown on overlay should reflect full loop time (including cap sleep).
+            loop_duration = time.time() - t_start
+            self.fps = round(1.0 / max(loop_duration, 0.001))
 
     def cleanup(self):
         """Clean up resources."""
