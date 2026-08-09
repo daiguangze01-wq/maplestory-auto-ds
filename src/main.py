@@ -129,6 +129,16 @@ def main():
     last_frame_seq = -1
     t_last_display = time.time()
 
+    cv2.namedWindow(win_name)
+
+    def _on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            detector.request_title_selection_from_display(x, y)
+        elif event == cv2.EVENT_RBUTTONDOWN:
+            detector.clear_title_selection()
+
+    cv2.setMouseCallback(win_name, _on_mouse)
+
     try:
         while not detector.is_terminated:
             # Show debug image — only when a new frame is ready
@@ -166,6 +176,8 @@ def main():
                 from src.utils.common import screenshot
                 screenshot(detector.img_display, "detection")
                 logger.info("Screenshot saved.")
+            elif key == ord('c'):
+                detector.clear_title_selection()
 
             # No extra fixed sleep: let waitKey pump events smoothly.
 

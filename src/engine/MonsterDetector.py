@@ -67,6 +67,13 @@ class MonsterDetector:
         # Player location — detected via title template matching
         self.loc_player = (0, 0)
         self.loc_title = None  # Last known title position (for fast local search)
+        self._title_last_seen_frame = -1
+        self._title_state_lock = threading.Lock()
+        self._title_candidates_snapshot = []
+        self._manual_title_locked = False
+        self._selected_title_loc = None
+        self._pending_title_select_loc = None
+        self._title_lock_miss_count = 0
 
         # Minimap
         self.loc_minimap = (0, 0)
@@ -575,6 +582,134 @@ class MonsterDetector:
         h, w = self.img_frame.shape[:2]
         self.loc_player = (w // 2, h // 2)
 
+    def _collect_title_candidates(self, img_roi, img_pat, max_candidates: int, score_threshold: float):
+        """Collect multiple non-overlapping title candidates from a full-frame template match."""
+        h_img, w_img = img_roi.shape[:2]
+        h_pat, w_pat = img_pat.shape[:2]
+        if h_pat > h_img or w_pat > w_img:
+            return []
+
+        result = cv2.matchTemplate(img_roi, img_pat, cv2.TM_SQDIFF_NORMED)
+        result = np.nan_to_num(result, nan=1.0, posinf=1.0, neginf=1.0)
+        work = result.copy()
+        suppress_x = max(12, w_pat // 2)
+        suppress_y = max(8, h_pat // 2)
+
+        candidates = []
+        for _ in range(max_candidates):
+            min_val, _, min_loc, _ = cv2.minMaxLoc(work)
+            if min_val > score_threshold:
+                break
+            x, y = int(min_loc[0]), int(min_loc[1])
+            candidates.append({
+                "loc": (x, y),
+                "score": float(min_val),
+                "cost": float(min_val),
+                "box": (x, y, w_pat, h_pat),
+            })
+            x0 = max(0, x - suppress_x)
+            x1 = min(work.shape[1], x + suppress_x + 1)
+            y0 = max(0, y - suppress_y)
+            y1 = min(work.shape[0], y + suppress_y + 1)
+            work[y0:y1, x0:x1] = 1.0
+
+        return candidates
+
+    def _update_title_candidates_snapshot(self, candidates, template_size):
+        """Store the latest title candidates for debug rendering and click selection."""
+        tw, th = template_size
+        normalized = []
+        with self._title_state_lock:
+            selected_loc = self._selected_title_loc
+            locked = self._manual_title_locked
+        for idx, cand in enumerate(sorted(candidates, key=lambda c: c.get("score", 1.0))):
+            x, y = cand["loc"]
+            is_selected = False
+            if locked and selected_loc is not None:
+                is_selected = abs(x - selected_loc[0]) <= max(12, tw // 2) and abs(y - selected_loc[1]) <= max(8, th // 2)
+            normalized.append({
+                "idx": idx + 1,
+                "loc": (int(x), int(y)),
+                "box": (int(x), int(y), int(tw), int(th)),
+                "score": float(cand.get("score", 1.0)),
+                "src": cand.get("src", "cand"),
+                "selected": is_selected,
+            })
+        with self._title_state_lock:
+            self._title_candidates_snapshot = normalized
+
+    def request_title_selection_from_display(self, display_x: int, display_y: int) -> bool:
+        """Queue manual title selection by clicking a candidate box in the display window."""
+        scale = float(self.cfg.get("monster_detect", {}).get("display_scale", 0.55))
+        scale = max(scale, 0.01)
+        raw_x = int(round(display_x / scale))
+        raw_y = int(round(display_y / scale))
+
+        with self._title_state_lock:
+            hits = []
+            for cand in self._title_candidates_snapshot:
+                x, y, w, h = cand["box"]
+                if x <= raw_x <= x + w and y <= raw_y <= y + h:
+                    hits.append(cand)
+            if not hits:
+                return False
+            chosen = min(hits, key=lambda c: c["score"])
+            self._pending_title_select_loc = chosen["loc"]
+
+        logger.info(
+            f"[Title] Queued manual selection idx={chosen['idx']} loc={chosen['loc']} score={chosen['score']:.4f}"
+        )
+        return True
+
+    def clear_title_selection(self):
+        """Clear the manual title lock and return to automatic title selection."""
+        with self._title_state_lock:
+            self._manual_title_locked = False
+            self._selected_title_loc = None
+            self._pending_title_select_loc = None
+            self._title_lock_miss_count = 0
+        self.loc_title = None
+        self._title_last_seen_frame = -1
+        logger.info("[Title] Cleared manual title selection")
+
+    def _draw_title_candidates(self):
+        """Draw title candidates and manual selection state on the debug frame."""
+        if self.img_frame_debug is None:
+            return
+
+        with self._title_state_lock:
+            candidates = list(self._title_candidates_snapshot)
+            locked = self._manual_title_locked
+            miss_count = self._title_lock_miss_count
+
+        for cand in candidates:
+            x, y, w, h = cand["box"]
+            color = (0, 255, 0) if cand.get("selected") else (0, 255, 255)
+            label = f"T{cand['idx']}:{cand['score']:.2f}"
+            cv2.rectangle(self.img_frame_debug, (x, y), (x + w, y + h), color, 2)
+            cv2.putText(
+                self.img_frame_debug,
+                label,
+                (x, max(15, y - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+
+        status = f"TitleSel: {'LOCKED' if locked else 'AUTO'} | LClick select | RClick/C clear | miss={miss_count}"
+        cv2.putText(
+            self.img_frame_debug,
+            status,
+            (10, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 255) if locked else (255, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
+
     def _detect_player_by_title(self):
         """Detect player location by matching the title template (at character feet)."""
         if self.img_title is None:
@@ -589,6 +724,10 @@ class MonsterDetector:
         title_offset = title_cfg.get("offset", [0, -60])
         if not isinstance(title_offset, (list, tuple)) or len(title_offset) < 2:
             title_offset = [0, -60]
+
+        mode = str(title_cfg.get("mode", "white_mask")).strip().lower()
+        if mode not in ("white_mask", "grayscale"):
+            mode = "white_mask"
 
         lower_white = int(title_cfg.get("white_lower", 150))
         upper_white = int(title_cfg.get("white_upper", 255))
@@ -605,27 +744,267 @@ class MonsterDetector:
             blur_k += 1
 
         match_threshold = float(title_cfg.get("match_threshold", 0.3))
+        cache_ttl = int(title_cfg.get("cache_ttl", 30))
+        center_search_radius = int(title_cfg.get("center_search_radius", 420))
+        center_accept_radius = int(title_cfg.get("center_accept_radius", min(center_search_radius, 260)))
+        center_bias_weight = float(title_cfg.get("center_bias_weight", 0.08))
+        max_jump_px = int(title_cfg.get("max_jump_px", 220))
+        prev_search_radius = int(title_cfg.get("prev_search_radius", 220))
+        stick_to_prev_margin = float(title_cfg.get("stick_to_prev_margin", 0.02))
+        strong_match_threshold = float(title_cfg.get("strong_match_threshold", max(0.03, match_threshold * 0.35)))
+        top_k = max(1, int(title_cfg.get("top_k", 12)))
+        manual_select = bool(title_cfg.get("manual_select", True))
+        max_candidates = max(1, int(title_cfg.get("max_candidates", 6)))
+        candidate_threshold = float(
+            title_cfg.get("candidate_threshold", min(0.35, max(match_threshold, match_threshold * 1.25)))
+        )
+        lock_miss_tolerance = max(1, int(title_cfg.get("lock_miss_tolerance", 15)))
+        manual_track_radius = max(20, int(title_cfg.get("manual_track_radius", prev_search_radius)))
+        manual_track_threshold = float(
+            title_cfg.get("manual_track_threshold", min(0.4, max(match_threshold + 0.05, match_threshold * 1.25)))
+        )
+
+        # Periodically drop cached title lock so the tracker can recover from a wrong person.
+        if (self.loc_title is not None and cache_ttl > 0
+                and self._title_last_seen_frame >= 0
+                and self.frame_count - self._title_last_seen_frame > cache_ttl):
+            self.loc_title = None
+
+        had_lock = self.loc_title is not None
+
+        def _prepare_title_match_images():
+            if mode == "grayscale":
+                img_pat = self.img_title_gray
+                img_roi = self.img_frame_gray
+                if blur_k > 1:
+                    img_pat = cv2.GaussianBlur(img_pat, (blur_k, blur_k), 0)
+                    img_roi = cv2.GaussianBlur(img_roi, (blur_k, blur_k), 0)
+                return img_roi, img_pat
+
+            # white_mask mode (legacy default)
+            img_pat = cv2.inRange(self.img_title_gray, lower_white, upper_white)
+            img_roi = cv2.inRange(self.img_frame_gray, lower_white, upper_white)
+            if blur_k > 1:
+                img_pat = cv2.GaussianBlur(img_pat, (blur_k, blur_k), 0)
+                img_roi = cv2.GaussianBlur(img_roi, (blur_k, blur_k), 0)
+            return img_roi, img_pat
+
+        def _biased_sqdiff_match(img_roi, img_pat, anchor, radius=None, bias_weight=0.08):
+            """Pick among top-K SQDIFF matches using a distance-to-anchor bias."""
+            h_img, w_img = img_roi.shape[:2]
+            h_pat, w_pat = img_pat.shape[:2]
+            if h_pat > h_img or w_pat > w_img:
+                return None
+
+            x_off = 0
+            y_off = 0
+            search_img = img_roi
+
+            if radius is not None:
+                x0 = max(0, int(anchor[0] - radius))
+                y0 = max(0, int(anchor[1] - radius))
+                x1 = min(w_img, int(anchor[0] + radius + w_pat))
+                y1 = min(h_img, int(anchor[1] + radius + h_pat))
+                if x1 - x0 >= w_pat and y1 - y0 >= h_pat:
+                    search_img = img_roi[y0:y1, x0:x1]
+                    x_off, y_off = x0, y0
+
+            result = cv2.matchTemplate(search_img, img_pat, cv2.TM_SQDIFF_NORMED)
+            result = np.nan_to_num(result, nan=1.0, posinf=1.0, neginf=1.0)
+
+            flat = result.reshape(-1)
+            if flat.size == 0:
+                return None
+
+            k = min(top_k, flat.size)
+            idxs = np.argpartition(flat, k - 1)[:k]
+            out_h, out_w = result.shape[:2]
+            diag = max((w_img ** 2 + h_img ** 2) ** 0.5, 1.0)
+
+            best = None
+            for idx in idxs:
+                y, x = divmod(int(idx), out_w)
+                score = float(result[y, x])
+                gx = x + x_off
+                gy = y + y_off
+                dist = ((gx - anchor[0]) ** 2 + (gy - anchor[1]) ** 2) ** 0.5 / diag
+                cost = score + bias_weight * dist
+                if best is None or cost < best["cost"]:
+                    best = {
+                        "loc": (gx, gy),
+                        "score": score,
+                        "cost": cost,
+                        "center_dist_px": ((gx - center_anchor[0]) ** 2 + (gy - center_anchor[1]) ** 2) ** 0.5,
+                    }
+            return best
 
         try:
-            # White-mask binarization: extract only bright pixels from template + frame
-            # (参考项目 nametag white_mask 模式，对文字类模板更准)
-            img_nametag_bin = cv2.inRange(self.img_title_gray, lower_white, upper_white)
-            img_roi_bin = cv2.inRange(self.img_frame_gray, lower_white, upper_white)
+            img_roi_proc, img_title_proc = _prepare_title_match_images()
+            th, tw = img_title_proc.shape[:2]
+            fh, fw = img_roi_proc.shape[:2]
 
-            # Gaussian blur to soften edges
-            img_nametag_bin = cv2.GaussianBlur(img_nametag_bin, (blur_k, blur_k), 0)
-            img_roi_bin = cv2.GaussianBlur(img_roi_bin, (blur_k, blur_k), 0)
-
-            # Match binary masks
-            loc, score, is_cached = find_pattern_sqdiff(
-                img_roi_bin, img_nametag_bin,
-                last_result=self.loc_title,
-                global_threshold=match_threshold
+            center_anchor = (max(0, fw // 2 - tw // 2), max(0, fh // 2 - th // 2))
+            candidate_pool = self._collect_title_candidates(
+                img_roi_proc, img_title_proc,
+                max_candidates=max_candidates,
+                score_threshold=candidate_threshold,
             )
+            self._update_title_candidates_snapshot(candidate_pool, (tw, th))
+
+            with self._title_state_lock:
+                if self._pending_title_select_loc is not None:
+                    self._selected_title_loc = self._pending_title_select_loc
+                    self._manual_title_locked = True
+                    self.loc_title = self._pending_title_select_loc
+                    self._title_lock_miss_count = 0
+                    self._pending_title_select_loc = None
+                    logger.info(f"[Title] Manual target armed at {self.loc_title}")
+                manual_locked = manual_select and self._manual_title_locked
+                selected_loc = self._selected_title_loc
+
+            if manual_locked and selected_loc is not None:
+                tracked = []
+                for cand in candidate_pool:
+                    dist = ((cand["loc"][0] - selected_loc[0]) ** 2 + (cand["loc"][1] - selected_loc[1]) ** 2) ** 0.5
+                    cand["manual_dist_px"] = dist
+                    cand["src"] = cand.get("src", "manual_pool")
+                    if dist <= manual_track_radius:
+                        tracked.append(cand)
+
+                manual_best = min(
+                    tracked,
+                    key=lambda c: (c["score"], c.get("manual_dist_px", 0.0)),
+                    default=None,
+                )
+
+                if manual_best is not None and manual_best["score"] <= manual_track_threshold:
+                    loc = manual_best["loc"]
+                    score = manual_best["score"]
+                    match_src = "manual"
+                    rejected = []
+                    with self._title_state_lock:
+                        self._selected_title_loc = loc
+                        self._title_lock_miss_count = 0
+                    self._update_title_candidates_snapshot(candidate_pool, (tw, th))
+                else:
+                    with self._title_state_lock:
+                        self._title_lock_miss_count += 1
+                        miss_count = self._title_lock_miss_count
+                    if self.loc_title is not None and miss_count <= lock_miss_tolerance:
+                        loc = self.loc_title
+                        score = 1.0
+                        match_src = "manual_hold"
+                        rejected = []
+                    else:
+                        with self._title_state_lock:
+                            self._manual_title_locked = False
+                            self._selected_title_loc = None
+                            self._title_lock_miss_count = 0
+                        manual_locked = False
+
+            candidates = []
+
+            # Candidate 1: around previous lock (if any), weak bias for temporal stability.
+            if not manual_locked and self.loc_title is not None:
+                prev_cand = _biased_sqdiff_match(
+                    img_roi_proc, img_title_proc,
+                    anchor=self.loc_title,
+                    radius=prev_search_radius,
+                    bias_weight=0.04,
+                )
+                if prev_cand is not None:
+                    prev_cand["src"] = "prev"
+                    prev_cand["jump_px"] = 0.0
+                    candidates.append(prev_cand)
+
+            # Candidate 2: around center (primary anti-confusion strategy).
+            if not manual_locked:
+                center_cand = _biased_sqdiff_match(
+                    img_roi_proc, img_title_proc,
+                    anchor=center_anchor,
+                    radius=center_search_radius,
+                    bias_weight=center_bias_weight,
+                )
+                if center_cand is not None:
+                    center_cand["src"] = "center"
+                    center_cand["jump_px"] = (
+                        ((center_cand["loc"][0] - self.loc_title[0]) ** 2
+                         + (center_cand["loc"][1] - self.loc_title[1]) ** 2) ** 0.5
+                        if self.loc_title is not None else 0.0
+                    )
+                    candidates.append(center_cand)
+
+            # Candidate 3: global fallback only for recovery when there is no active lock.
+            best_local_score = min([c["score"] for c in candidates], default=1.0)
+            if not manual_locked and not had_lock and best_local_score > match_threshold * 0.9:
+                global_cand = _biased_sqdiff_match(
+                    img_roi_proc, img_title_proc,
+                    anchor=center_anchor,
+                    radius=None,
+                    bias_weight=center_bias_weight,
+                )
+                if global_cand is not None:
+                    global_cand["src"] = "global"
+                    global_cand["jump_px"] = 0.0
+                    candidates.append(global_cand)
+
+            if not manual_locked and not candidates:
+                self._fallback_player_location()
+                return
+
+            if not manual_locked:
+                filtered = []
+                rejected = []
+                for cand in candidates:
+                    src = cand.get("src", "unknown")
+                    center_dist_px = cand.get("center_dist_px", 0.0)
+                    jump_px = cand.get("jump_px", 0.0)
+
+                    if src != "prev" and center_dist_px > center_accept_radius:
+                        rejected.append((src, "far_from_center", round(center_dist_px, 1), round(cand["score"], 4)))
+                        continue
+                    if had_lock and src != "prev" and jump_px > max_jump_px:
+                        rejected.append((src, "jump_too_large", round(jump_px, 1), round(cand["score"], 4)))
+                        continue
+                    filtered.append(cand)
+
+                if not filtered and had_lock:
+                    loc = self.loc_title
+                    score = 1.0
+                    match_src = "prev_keep"
+                else:
+                    if not filtered:
+                        self._fallback_player_location()
+                        return
+
+                    prev_good = next(
+                        (c for c in filtered
+                         if c.get("src") == "prev" and c["score"] < match_threshold),
+                        None,
+                    )
+                    best_other = min(
+                        [c for c in filtered if c.get("src") != "prev"],
+                        key=lambda c: c["cost"],
+                        default=None,
+                    )
+
+                    if prev_good is not None:
+                        if (best_other is None
+                                or best_other["score"] >= strong_match_threshold
+                                or best_other["score"] + stick_to_prev_margin >= prev_good["score"]):
+                            best = prev_good
+                        else:
+                            best = best_other
+                    else:
+                        best = min(filtered, key=lambda c: c["cost"])
+
+                    loc = best["loc"]
+                    score = best["score"]
+                    match_src = best.get("src", "unknown")
         except cv2.error as e:
             logger.warning(
                 f"[Title] OpenCV error, skip frame: {e}. "
-                f"blur_kernel={blur_k}, white=({lower_white},{upper_white})"
+                f"mode={mode}, blur_kernel={blur_k}, white=({lower_white},{upper_white})"
             )
             self._fallback_player_location()
             return
@@ -636,14 +1015,24 @@ class MonsterDetector:
 
         # Log score every frame for first 100 frames, then every 30 frames
         if self.frame_count <= 100 or self.frame_count % 30 == 0:
-            status = "HIT" if score < match_threshold else "MISS"
+            status = "HIT" if (score < match_threshold or match_src in ("manual", "manual_hold", "prev_keep")) else "MISS"
             logger.info(
                 f"[Title] frame={self.frame_count} score={score:.4f} "
-                f"thresh={match_threshold:.2f} {status} cached={is_cached}"
+                f"thresh={match_threshold:.2f} {status} src={match_src} mode={mode}"
             )
+            if 'rejected' in locals() and rejected:
+                logger.info(f"[Title] Rejected candidates: {rejected[:3]}")
 
-        if score < match_threshold:
+        if score < match_threshold or match_src in ("prev_keep", "manual", "manual_hold"):
+            # Anti-jump guard: reject sudden large jumps unless score is very confident.
+            if self.loc_title is not None and match_src not in ("prev_keep", "manual_hold"):
+                jump = ((loc[0] - self.loc_title[0]) ** 2 + (loc[1] - self.loc_title[1]) ** 2) ** 0.5
+                if jump > max_jump_px and score > max(0.04, match_threshold * 0.45):
+                    loc = self.loc_title
             self.loc_title = loc
+            self._title_last_seen_frame = self.frame_count
+            if 'candidate_pool' in locals() and 'tw' in locals() and 'th' in locals():
+                self._update_title_candidates_snapshot(candidate_pool, (tw, th))
             tw, th = self.img_title.shape[1], self.img_title.shape[0]
             self.loc_player = (
                 loc[0] + tw // 2 + title_offset[0],
@@ -775,9 +1164,17 @@ class MonsterDetector:
         if self.img_route is None or self.loc_player_global == (0.0, 0.0):
             return None, None
 
+        return self._get_nearest_route_color_from_image(self.img_route)
+
+    def _get_nearest_route_color_from_image(self, route_img, search_range=None):
+        """Scan a specific route image around player for nearest route pixels."""
+        if route_img is None or self.loc_player_global == (0.0, 0.0):
+            return None, None
+
         x0, y0 = int(self.loc_player_global[0]), int(self.loc_player_global[1])
-        h, w = self.img_route.shape[:2]
-        search_range = self.cfg["route"].get("search_range", 10)
+        h, w = route_img.shape[:2]
+        if search_range is None:
+            search_range = self.cfg["route"].get("search_range", 10)
 
         x_min = max(0, x0 - search_range)
         x_max = min(w, x0 + search_range)
@@ -791,7 +1188,7 @@ class MonsterDetector:
 
         for y in range(y_min, y_max):
             for x in range(x_min, x_max):
-                pixel = tuple(self.img_route[y, x])
+                pixel = tuple(route_img[y, x])
                 dist = abs(x - x0) + abs(y - y0)
                 if pixel in self.color_code and dist < min_dist:
                     nearest = {"pixel": (x, y), "command": self.color_code[pixel], "distance": dist}
@@ -802,8 +1199,40 @@ class MonsterDetector:
 
         return nearest, nearest_ud
 
+    def _select_best_route(self):
+        """Select the route image nearest to the current global player position."""
+        if not self.img_routes or self.loc_player_global == (0.0, 0.0):
+            return
+
+        search_range = int(self.cfg.get("route", {}).get("search_range", 10))
+        auto_select_range = int(self.cfg.get("route", {}).get("auto_select_range", max(30, search_range * 4)))
+
+        best = None
+        for idx, route_img in enumerate(self.img_routes):
+            nearest, nearest_ud = self._get_nearest_route_color_from_image(route_img, auto_select_range)
+            distances = []
+            if nearest is not None:
+                distances.append(nearest["distance"])
+            if nearest_ud is not None:
+                distances.append(nearest_ud["distance"])
+            if not distances:
+                continue
+            dist = min(distances)
+            if best is None or dist < best["dist"]:
+                best = {"idx": idx, "dist": dist}
+
+        if best is not None and best["idx"] != self.idx_routes:
+            self.idx_routes = best["idx"]
+            self.img_route = self.img_routes[self.idx_routes]
+            logger.info(
+                f"[Route] Auto-selected route {self.idx_routes + 1}/{len(self.img_routes)} "
+                f"for global=({int(self.loc_player_global[0])},{int(self.loc_player_global[1])}) "
+                f"dist={best['dist']}"
+            )
+
     def update_cmd_by_route(self):
         """Convert nearest route color to movement commands."""
+        self._select_best_route()
         nearest, nearest_ud = self.get_nearest_route_color()
 
         if nearest and nearest_ud:
@@ -932,7 +1361,7 @@ class MonsterDetector:
                 f"Global: ({gx},{gy}) MM:({mx},{my}) PMM:{self.loc_player_minimap or '?'} Match:{getattr(self,'_last_match_score',1):.3f}",
                 f"Ladder: {self.is_on_ladder} | Map: {self.img_map.shape[1]}x{self.img_map.shape[0]}" if self.img_map is not None else "No map loaded",
             ]
-        texts += ["S=shot Q=quit F1=toggle"]
+        texts += ["S=shot C/RClick=clear-title Q=quit F1=toggle"]
 
         # Bottom-left positioning (matches reference project)
         text_y_interval = 25
@@ -962,6 +1391,8 @@ class MonsterDetector:
                 (self.img_frame.shape[1] - tw - 15, th + 20),
                 cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3, cv2.LINE_AA
             )
+
+        self._draw_title_candidates()
 
     # -------------------------------------------------------------------
     # Main processing loop
@@ -1086,19 +1517,32 @@ class MonsterDetector:
         if self._kb:
             move_x, move_y = "none", "none"
             action = "none"
+            route_move_x, route_move_y = "none", "none"
 
             if self.cfg["bot"].get("enable_route") and self.img_route is not None:
-                move_x, move_y = self.cmd_move_x, self.cmd_move_y
+                route_move_x, route_move_y = self.cmd_move_x, self.cmd_move_y
+                move_x, move_y = route_move_x, route_move_y
                 action = route_action
 
-            # Attack switch: only enabled in hunt mode.
+            # Attack switch: in hunt mode, combat takes priority over route actions.
             mode = self.cfg.get("bot", {}).get("mode", "detect")
-            if mode == "hunt" and self.monsters and action in ("none", "stop"):
+            if mode == "hunt" and self.monsters:
                 action = "attack"
                 if self.cfg.get("bot", {}).get("attack", "directional") == "directional":
                     facing = self._get_attack_facing()
                     if facing in ("left", "right"):
-                        move_x = facing
+                        move_x = f"face_{facing}"
+                        # When fighting on flat ground, ignore route horizontal drift.
+                        if not self.is_on_ladder:
+                            move_y = "none"
+                    elif route_move_x in ("left", "right") and self.is_on_ladder:
+                        move_x = route_move_x
+
+            if mode == "hunt" and self.frame_count % 30 == 0:
+                logger.info(
+                    f"[Hunt] monsters={len(self.monsters)} route=({route_move_x},{route_move_y},{route_action}) "
+                    f"dispatch=({move_x},{move_y},{action}) on_ladder={self.is_on_ladder}"
+                )
 
             self._kb.set_command(f"{move_x} {move_y} {action}")
 
@@ -1128,6 +1572,7 @@ class MonsterDetector:
             if self.img_route is not None and self.loc_player_global != (0.0, 0.0):
                 route_bgr = cv2.cvtColor(self.img_route, cv2.COLOR_RGB2BGR)
                 gx, gy = int(self.loc_player_global[0]), int(self.loc_player_global[1])
+                crop_w, crop_h = 80, 80
                 # Draw player dot on route preview (yellow)
                 cv2.circle(route_bgr, (gx, gy), 2, (0, 255, 255), -1)
                 # Draw minimap matching rectangle

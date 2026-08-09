@@ -48,6 +48,12 @@ character:
 title:
   enable: true               # 是否启用标题识别
   mode: "grayscale"         # grayscale = 灰度直接匹配；white_mask = 白色二值化匹配
+  manual_select: true        # 是否允许在监视器窗口中点击候选称号手动锁定角色
+  max_candidates: 6          # 最多显示多少个称号候选框
+  candidate_threshold: 0.32  # 候选显示阈值（可比 match_threshold 略宽）
+  lock_miss_tolerance: 15    # 手动锁定后允许连续丢失多少帧再解锁
+  manual_track_radius: 180   # 手动锁定后，在该半径内继续跟踪所选称号
+  manual_track_threshold: 0.32 # 手动锁定跟踪阈值
   offset: [0, -60]           # 标题→角色位置的像素偏移 [x, y]
   white_lower: 150           # 白色二值化下限 (0-255)，越低提取越多偏灰像素
   white_upper: 255           # 白色二值化上限
