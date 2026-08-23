@@ -120,6 +120,9 @@ def main():
             'f3', detector.health_monitor.toggle_mp
         )
 
+    # Register F11 to toggle bot mode (detect <-> hunt)
+    kb_listener.register_func_key_handler('f11', detector.toggle_mode)
+
     # -------------------------------------------------------------------
     # Main thread: display loop (matches reference: main() while loop)
     # Processing runs in background, display never blocks.

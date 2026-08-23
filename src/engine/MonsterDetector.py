@@ -97,6 +97,23 @@ class MonsterDetector:
         self._kb = None  # Keyboard controller (set externally)
         self.health_monitor = None  # Health monitor (initialized in start())
 
+        # Hunt-mode search state (used when no monsters are detected)
+        self._hunt_no_monster_frames = 0
+        self._hunt_search_dir = "left"
+        self._hunt_search_flip_frame = 0
+        self._hunt_search_sweeps = 0
+        self._hunt_search_pause_until = 0
+        self._hunt_search_anchor_x = None
+        self._hunt_search_last_progress_x = None
+        self._hunt_search_stall_frames = 0
+        self._hunt_search_last_reason = "idle"
+
+        # In-place attack "walk about" state machine (prevents attack lockout)
+        self._in_place_state = "attack"       # "attack" | "pre_walk" | "walk_away" | "walk_back"
+        self._in_place_state_frame = 0        # frame counter for current state
+        self._in_place_walk_dir = "left"      # fallback direction when no facing
+        self._in_place_backward_dir = "left"  # backward dir (opposite of facing)
+
         # Load title template for player detection
         self.img_title = None
         self.img_title_gray = None
@@ -502,7 +519,10 @@ class MonsterDetector:
         Detect monsters by finding enemy HP bar colors in the ROI.
         """
         hp_color = np.array(self.cfg["monster_detect"]["hp_bar_color"])
-        mask = cv2.inRange(img_roi, hp_color, hp_color)
+        tol = int(self.cfg["monster_detect"].get("hp_bar_tolerance", 30))
+        lower = np.clip(hp_color - tol, 0, 255)
+        upper = np.clip(hp_color + tol, 0, 255)
+        mask = cv2.inRange(img_roi, lower, upper)
 
         num_labels, _, stats, _ = cv2.connectedComponentsWithStats(
             mask, connectivity=8
@@ -1058,11 +1078,14 @@ class MonsterDetector:
             x, y, w_m, h_m = result
             if self.frame_count == 1:
                 logger.info(f"[Minimap] Auto-detected: ({x},{y}) {w_m}x{h_m}")
-            return (x + 1, y + 1, w_m - 2, h_m - 2)
+            # Keep a 1px inset from border, but reject degenerate auto-detects.
+            x_i, y_i, w_i, h_i = (x + 1, y + 1, w_m - 2, h_m - 2)
+            if w_i > 0 and h_i > 0:
+                return (x_i, y_i, w_i, h_i)
 
         # Fallback to config
         mm_cfg = self.cfg.get("minimap", {})
-        if mm_cfg.get("width", 0) > 10:
+        if mm_cfg.get("width", 0) > 10 and mm_cfg.get("height", 0) > 10:
             return (mm_cfg["x"], mm_cfg["y"], mm_cfg["width"], mm_cfg["height"])
         return None
 
@@ -1297,6 +1320,191 @@ class MonsterDetector:
             return "none"
         return "right" if nearest_dx > 0 else "left"
 
+    def _reset_hunt_search_state(self):
+        """Reset no-monster search state once a target is found."""
+        self._hunt_no_monster_frames = 0
+        self._hunt_search_flip_frame = 0
+        self._hunt_search_sweeps = 0
+        self._hunt_search_pause_until = 0
+        self._hunt_search_anchor_x = None
+        self._hunt_search_last_progress_x = None
+        self._hunt_search_stall_frames = 0
+        self._hunt_search_last_reason = "target"
+
+    def _get_hunt_search_progress_x(self):
+        """Return stable X progress for search logic, preferring map/minimap coordinates.
+        Screen-space coords are NOT used because the camera follows the player."""
+        if self.cfg.get("bot", {}).get("enable_route") and self.loc_player_global != (0.0, 0.0):
+            return float(self.loc_player_global[0]), "global"
+        if self.loc_player_minimap is not None:
+            return float(self.loc_player_minimap[0]), "minimap"
+        return None, "none"
+
+    def _get_hunt_search_command(self):
+        """Return (move_x, move_y, action) for left/right sweeping while searching monsters."""
+        cfg = self.cfg.get("directional_attack", {})
+        if not bool(cfg.get("search_enabled", True)):
+            return "none", "none", "none"
+
+        # Keep ladder handling to route logic; avoid lateral sweep while climbing.
+        if self.is_on_ladder:
+            return "none", "none", "none"
+
+        trigger_frames = max(1, int(cfg.get("search_trigger_frames", 4)))
+        if self._hunt_no_monster_frames < trigger_frames:
+            return "none", "none", "none"
+
+        if self.frame_count < self._hunt_search_pause_until:
+            return "none", "none", "none"
+
+        flip_frames = max(4, int(cfg.get("search_flip_frames", 18)))
+        progress_x, progress_src = self._get_hunt_search_progress_x()
+        if progress_x is not None and self._hunt_search_anchor_x is None:
+            self._hunt_search_anchor_x = progress_x
+        if progress_x is not None and self._hunt_search_last_progress_x is None:
+            self._hunt_search_last_progress_x = progress_x
+
+        flip_reason = None
+        stall_frames_limit = int(cfg.get("search_stall_frames", 8))
+        if stall_frames_limit > 0:
+            stall_min_delta_px = float(cfg.get("search_stall_min_delta_px", 1.0))
+            if progress_x is not None and self._hunt_search_last_progress_x is not None:
+                progress_delta = abs(progress_x - self._hunt_search_last_progress_x)
+                if progress_delta <= stall_min_delta_px:
+                    self._hunt_search_stall_frames += 1
+                else:
+                    self._hunt_search_stall_frames = 0
+                self._hunt_search_last_progress_x = progress_x
+                if progress_src in ("global", "minimap") and self._hunt_search_stall_frames >= stall_frames_limit:
+                    flip_reason = "stall"
+
+        max_offset_px = float(cfg.get("search_max_offset_px", 0))
+        if (
+            flip_reason is None
+            and max_offset_px > 0
+            and progress_src in ("global", "minimap")
+            and progress_x is not None
+            and self._hunt_search_anchor_x is not None
+        ):
+            offset_x = progress_x - self._hunt_search_anchor_x
+            if self._hunt_search_dir == "left" and offset_x <= -max_offset_px:
+                flip_reason = "bound"
+            elif self._hunt_search_dir == "right" and offset_x >= max_offset_px:
+                flip_reason = "bound"
+
+        if self._hunt_search_flip_frame <= 0:
+            self._hunt_search_flip_frame = self.frame_count + flip_frames
+        elif flip_reason is None and self.frame_count >= self._hunt_search_flip_frame:
+            flip_reason = "timer"
+
+        if flip_reason is not None:
+            self._hunt_search_dir = "right" if self._hunt_search_dir == "left" else "left"
+            self._hunt_search_flip_frame = self.frame_count + flip_frames
+            self._hunt_search_sweeps += 1
+            self._hunt_search_stall_frames = 0
+            self._hunt_search_last_reason = flip_reason
+            if progress_x is not None:
+                self._hunt_search_anchor_x = progress_x
+                self._hunt_search_last_progress_x = progress_x
+
+        max_sweeps = int(cfg.get("search_max_sweeps", 0))
+        if max_sweeps > 0 and self._hunt_search_sweeps >= max_sweeps:
+            pause_frames = max(0, int(cfg.get("search_pause_frames", 12)))
+            self._hunt_search_pause_until = self.frame_count + pause_frames
+            self._hunt_search_sweeps = 0
+            self._hunt_search_last_reason = "pause"
+            return "none", "none", "none"
+
+        action = "attack" if bool(cfg.get("search_attack_while_move", True)) else "none"
+
+        # Random jump during search (looks more human-like)
+        jump_chance = float(cfg.get("search_random_jump_chance", 0.0))
+        if jump_chance > 0:
+            jump_cd = max(1, int(cfg.get("search_random_jump_cd", 30)))
+            if not hasattr(self, '_hunt_next_jump_frame'):
+                self._hunt_next_jump_frame = 0
+            if self.frame_count >= self._hunt_next_jump_frame:
+                import random
+                if random.random() < jump_chance:
+                    action = "jump"
+                    self._hunt_next_jump_frame = self.frame_count + jump_cd
+
+        return self._hunt_search_dir, "none", action
+
+    def _get_in_place_command(self):
+        """
+        In-place attack with periodic small back-and-forth, to avoid MapleStory's
+        attack lockout when standing still too long.
+
+        Walks backward (opposite of facing) first, then forward (facing dir)
+        to return to roughly the original spot.
+
+        State machine:
+          attack -> (after interval) -> walk_away(backward) ->
+          walk_back(forward) -> (after walk_frames) -> attack
+        Returns (move_x, move_y, action).
+        """
+        cfg = self.cfg.get("directional_attack", {})
+        interval = max(30, int(cfg.get("in_place_walk_interval", 300)))
+        walk_frames = max(1, int(cfg.get("in_place_walk_frames", 20)))
+        stop_frames = max(1, int(cfg.get("in_place_stop_attack_frames", 8)))  # ~0.5s @15fps
+
+        # Advance state machine
+        if self._in_place_state == "attack":
+            self._in_place_state_frame += 1
+            if self._in_place_state_frame >= interval:
+                # Decide backward direction: opposite of current facing.
+                facing = self._get_attack_facing()
+                if facing in ("left", "right"):
+                    self._in_place_backward_dir = "right" if facing == "left" else "left"
+                else:
+                    # No facing info (no monster) — alternate as fallback.
+                    self._in_place_backward_dir = (
+                        "right" if self._in_place_walk_dir == "left" else "left"
+                    )
+                self._in_place_walk_dir = self._in_place_backward_dir
+                self._in_place_state = "pre_walk"
+                self._in_place_state_frame = 0
+        elif self._in_place_state == "pre_walk":
+            # Stop attacking before moving (avoids attacking while walking).
+            self._in_place_state_frame += 1
+            if self._in_place_state_frame >= stop_frames:
+                self._in_place_state = "walk_away"
+                self._in_place_state_frame = 0
+        elif self._in_place_state == "walk_away":
+            self._in_place_state_frame += 1
+            if self._in_place_state_frame >= walk_frames:
+                self._in_place_state = "walk_back"
+                self._in_place_state_frame = 0
+        elif self._in_place_state == "walk_back":
+            self._in_place_state_frame += 1
+            if self._in_place_state_frame >= walk_frames:
+                self._in_place_state = "attack"
+                self._in_place_state_frame = 0
+
+        # Produce command per state
+        if self._in_place_state == "walk_away":
+            return self._in_place_backward_dir, "none", "none"   # 往后走
+        elif self._in_place_state == "walk_back":
+            forward_dir = "right" if self._in_place_backward_dir == "left" else "left"
+            return forward_dir, "none", "none"                    # 往前走
+
+        # "attack" / "pre_walk": stand still, no movement.
+        # Attack only during "attack" state (not during pre_walk pause).
+        if self._in_place_state == "attack":
+            if self.monsters:
+                aoe_threshold = int(
+                    self.cfg.get("directional_attack", {}).get("aoe_monster_count", 3)
+                )
+                action = "aoe" if len(self.monsters) >= aoe_threshold else "attack"
+                # Turn to face the nearest monster before attacking.
+                facing = self._get_attack_facing()
+                if facing in ("left", "right"):
+                    return f"face_{facing}", "none", action
+                return "none", "none", action
+            return "none", "none", "none"
+        return "none", "none", "none"
+
     def _update_debug_overlay(self):
         """Add FPS, HP/MP/EXP, and status info to the debug frame."""
 
@@ -1343,6 +1551,21 @@ class MonsterDetector:
                                     and px + pw <= self.img_frame_debug.shape[1]):
                                 self.img_frame_debug[py:py + ph, px:px + pw] = preview
 
+        # --- Bot mode indicator (top-right, below HP/MP) ---
+        bot_mode = self.cfg.get("bot", {}).get("mode", "detect")
+        mode_color = (0, 255, 0) if bot_mode == "hunt" else (0, 200, 255)
+        mode_text = f"Bot: {bot_mode.upper()} [F11]"
+        (mw, mh), _ = cv2.getTextSize(mode_text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+        mode_x = self.img_frame.shape[1] - mw - 12
+        mode_y = 30 + 30 * 3  # below HP/MP/EXP rows
+        cv2.rectangle(self.img_frame_debug,
+                      (mode_x - 4, mode_y - mh - 4),
+                      (mode_x + mw + 4, mode_y + 4),
+                      (0, 0, 0), -1)
+        cv2.putText(self.img_frame_debug, mode_text,
+                    (mode_x, mode_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, mode_color, 2, cv2.LINE_AA)
+
         # --- Status texts (bottom-left) ---
         diff_thres = self.cfg["monster_detect"]["diff_thres"]
         route_on = self.cfg["bot"].get("enable_route", False)
@@ -1352,6 +1575,11 @@ class MonsterDetector:
             f"Mode: {self.cfg['monster_detect']['mode']} | Scale: {self.cfg.get('monster_detect',{}).get('display_scale',1)}",
             f"Frame: {self.img_frame.shape[1]}x{self.img_frame.shape[0]}",
         ]
+
+        if self.cfg.get("bot", {}).get("mode", "detect") == "hunt":
+            texts.append(
+                f"Search: noMob={self._hunt_no_monster_frames} dir={self._hunt_search_dir} sweeps={self._hunt_search_sweeps} stall={self._hunt_search_stall_frames} last={self._hunt_search_last_reason}"
+            )
 
         if route_on:
             gx, gy = int(self.loc_player_global[0]), int(self.loc_player_global[1])
@@ -1422,38 +1650,59 @@ class MonsterDetector:
         # Update health monitor with bottom UI strip
         if self.health_monitor is not None:
             ui_y = self.cfg.get("ui_coords", {}).get("ui_y_start", 610)
-            self.health_monitor.update_frame(self.img_frame[ui_y:, :])
+            frame_h = self.img_frame.shape[0]
+            if 0 <= ui_y < frame_h:
+                self.health_monitor.update_frame(self.img_frame[ui_y:, :])
+            else:
+                self.health_monitor.update_frame(None)
+                if self.frame_count % 90 == 0:
+                    logger.warning(
+                        f"[HealthMonitor] ui_y_start out of frame: ui_y_start={ui_y}, frame_h={frame_h}"
+                    )
 
         # Detect minimap (adapted for MapleStoryGo: bright fill + dark borders)
         minimap_result = self._detect_minimap()
+        self.img_minimap = None
         if minimap_result:
             x, y, w, h = minimap_result
-            self.loc_minimap = (x, y)
-            self.img_minimap = self.img_frame[y:y + h, x:x + w]
+            fh, fw = self.img_frame.shape[:2]
+            x0 = max(0, int(x))
+            y0 = max(0, int(y))
+            x1 = min(fw, int(x + w))
+            y1 = min(fh, int(y + h))
+            self.loc_minimap = (x0, y0)
+            if x1 > x0 and y1 > y0:
+                self.img_minimap = self.img_frame[y0:y1, x0:x1]
+            elif self.frame_count % 60 == 0:
+                logger.warning(
+                    f"[Minimap] Empty ROI after clamp: raw=({x},{y},{w},{h}) "
+                    f"frame=({fw}x{fh})"
+                )
 
             # Find player dot — connected components approach
             # Player dot is a small compact cluster; terrain yellow is large/scattered
-            player_color = self.cfg.get("minimap", {}).get("player_color", (136, 255, 255))
-            base_tol = self.cfg.get("minimap", {}).get("player_tolerance", 15)
-            for tol in [base_tol, base_tol + 10, base_tol + 20, base_tol + 30]:
-                lower = tuple(max(0, c - tol) for c in player_color)
-                upper = tuple(min(255, c + tol) for c in player_color)
-                mask = cv2.inRange(self.img_minimap, lower, upper)
-                # Find connected components, pick the best one (not terrain blob)
-                num_lbl, lbl, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
-                best = None
-                best_score = -1
-                for i in range(1, num_lbl):
-                    area = stats[i, cv2.CC_STAT_AREA]
-                    # Player dot: 3-15 pixels, compact
-                    if 3 <= area <= 15:
-                        # Prefer larger clusters (more confident match)
-                        if area > best_score:
-                            best_score = area
-                            best = centroids[i]
-                if best is not None:
-                    self.loc_player_minimap = (int(round(best[0])), int(round(best[1])))
-                    break
+            if self.img_minimap is not None and self.img_minimap.size > 0:
+                player_color = self.cfg.get("minimap", {}).get("player_color", (136, 255, 255))
+                base_tol = self.cfg.get("minimap", {}).get("player_tolerance", 15)
+                for tol in [base_tol, base_tol + 10, base_tol + 20, base_tol + 30]:
+                    lower = tuple(max(0, c - tol) for c in player_color)
+                    upper = tuple(min(255, c + tol) for c in player_color)
+                    mask = cv2.inRange(self.img_minimap, lower, upper)
+                    # Find connected components, pick the best one (not terrain blob)
+                    num_lbl, lbl, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
+                    best = None
+                    best_score = -1
+                    for i in range(1, num_lbl):
+                        area = stats[i, cv2.CC_STAT_AREA]
+                        # Player dot: 3-15 pixels, compact
+                        if 3 <= area <= 15:
+                            # Prefer larger clusters (more confident match)
+                            if area > best_score:
+                                best_score = area
+                                best = centroids[i]
+                    if best is not None:
+                        self.loc_player_minimap = (int(round(best[0])), int(round(best[1])))
+                        break
 
             # Global positioning (layer 3)
             if self.cfg["bot"].get("enable_route") and self.img_map is not None:
@@ -1526,9 +1775,23 @@ class MonsterDetector:
 
             # Attack switch: in hunt mode, combat takes priority over route actions.
             mode = self.cfg.get("bot", {}).get("mode", "detect")
-            if mode == "hunt" and self.monsters:
-                action = "attack"
-                if self.cfg.get("bot", {}).get("attack", "directional") == "directional":
+            attack_style = self.cfg.get("bot", {}).get("attack", "directional")
+            attack_in_place = bool(
+                self.cfg.get("directional_attack", {}).get("attack_in_place", False)
+            )
+
+            if mode == "hunt" and attack_in_place:
+                # 原地攻击 + 定期左右走动（防攻击失效）
+                self._reset_hunt_search_state()
+                move_x, move_y, action = self._get_in_place_command()
+            elif mode == "hunt" and self.monsters:
+                self._reset_hunt_search_state()
+                # AoE when monster count >= threshold, else single-target attack.
+                aoe_threshold = int(
+                    self.cfg.get("directional_attack", {}).get("aoe_monster_count", 3)
+                )
+                action = "aoe" if len(self.monsters) >= aoe_threshold else "attack"
+                if attack_style == "directional":
                     facing = self._get_attack_facing()
                     if facing in ("left", "right"):
                         move_x = f"face_{facing}"
@@ -1537,11 +1800,18 @@ class MonsterDetector:
                             move_y = "none"
                     elif route_move_x in ("left", "right") and self.is_on_ladder:
                         move_x = route_move_x
+            elif mode == "hunt":
+                self._hunt_no_monster_frames += 1
+                if attack_style == "directional":
+                    search_x, search_y, search_action = self._get_hunt_search_command()
+                    if search_x != "none" or search_y != "none" or search_action != "none":
+                        move_x, move_y, action = search_x, search_y, search_action
 
             if mode == "hunt" and self.frame_count % 30 == 0:
                 logger.info(
-                    f"[Hunt] monsters={len(self.monsters)} route=({route_move_x},{route_move_y},{route_action}) "
-                    f"dispatch=({move_x},{move_y},{action}) on_ladder={self.is_on_ladder}"
+                    f"[Hunt] monsters={len(self.monsters)} inPlace={attack_in_place} "
+                    f"dispatch=({move_x},{move_y},{action}) on_ladder={self.is_on_ladder} "
+                    f"search=(noMob:{self._hunt_no_monster_frames},dir:{self._hunt_search_dir})"
                 )
 
             self._kb.set_command(f"{move_x} {move_y} {action}")
@@ -1626,6 +1896,14 @@ class MonsterDetector:
         self.is_frame_done = True
         return 0
 
+    def toggle_mode(self):
+        """Toggle bot mode between "detect" (only visualize) and "hunt" (attack)."""
+        current = self.cfg.get("bot", {}).get("mode", "detect")
+        new_mode = "hunt" if current == "detect" else "detect"
+        self.cfg["bot"]["mode"] = new_mode
+        logger.info(f"[Bot] Mode switched to: {new_mode}")
+        return new_mode
+
     def start(self):
         """
         Start the background processing thread and health monitor.
@@ -1664,7 +1942,11 @@ class MonsterDetector:
 
             # Cap FPS (matches reference project pattern)
             frame_duration = time.time() - t_start
-            target_duration = 1.0 / self.cfg["system"]["fps_limit_main"]
+            try:
+                fps_limit = float(self.cfg["system"]["fps_limit_main"])
+            except (ValueError, TypeError, KeyError):
+                fps_limit = 15.0
+            target_duration = 1.0 / max(fps_limit, 0.001)
             if frame_duration < target_duration:
                 time.sleep(target_duration - frame_duration)
 

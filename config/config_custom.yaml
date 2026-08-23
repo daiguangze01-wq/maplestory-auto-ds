@@ -1,5 +1,5 @@
 bot:
-  mode: "detect" # detect = 只检测不攻击, hunt
+  mode: "hunt" # detect = 只检测不攻击, hunt
   attack: "directional"
   map: "north_forest_2"
   enable_route: false
@@ -9,6 +9,7 @@ system:
 
 key:
   directional_attack: "x"
+  aoe_skill: "a"
   add_hp: "end"
   add_mp: "home"
 
@@ -48,14 +49,33 @@ minimap:
   player_tolerance: 8            # 颜色容差起始值（会自动扩大到+30）
 
 monster_detect:
-  monsters: ["Octopus","lan_mo_gu"]
+  # monsters: ["Octopus","lan_mo_gu"]
+  monsters: ["Ligator"]
   # monsters: ["black_axe_stump"]
   # monsters: ["OrangeMushroom2"]
   mode: "color"                     # color / grayscale / contour_only
-  diff_thres: 0.28                  # 匹配阈值 0.0~1.0（越小越严格）
-  scales: [1.3]                 # 缩放比例数组 [0.5~1.5]，素材不匹配时加多个: [0.8, 1.0, 1.2]
+  diff_thres: 0.35                  # 匹配阈值 0.0~1.0（越小越严格）
+  scales: [1.25]                 # 缩放比例数组 [0.5~1.5]，素材不匹配时加多个: [0.8, 1.0, 1.2]
   display_scale: 0.47               # 监视器缩放 0.1~1.0（越小越流畅）
   detection_interval: 2             # 每N帧检测一次 1~5（1=每帧，越大越流畅）
+  with_enemy_hp_bar: true           # 通过怪物血条辅助检测（防掉落物遮挡）
+  hp_bar_color: [0, 255, 0]         # 怪物血条 BGR 颜色（绿色）
+  hp_bar_tolerance: 30              # 颜色容差（实际是0,243,0，容差30能匹配到）
+
+directional_attack:
+  attack_in_place: true            # 原地攻击：不移动持续攻击（刷固定点用）
+  aoe_monster_count: 3             # 识别怪物>=此数量时使用群攻
+  in_place_walk_interval: 300      # 原地攻击时每隔多少帧左右走动一次（防攻击失效）
+  in_place_walk_frames: 4         # 单方向走多少帧（走动幅度）
+  in_place_stop_attack_frames: 8  # 移动前先停攻击多少帧（约0.5s@15fps）
+  in_place_walk_dir: "alternate"   # alternate=左右交替 / left / right
+  search_attack_while_move: false   # 找怪时不攻击，避免停步
+  search_flip_frames: 4800            # 每方向走480帧（约16秒@30fps）
+  search_max_offset_px: 10000          # 单边最远走600px（翻倍）
+  search_stall_frames: 0             # 0=关闭stall检测（无路线时小地图动太慢会误判卡住）
+  search_stall_min_delta_px: 0       # 同上，关掉。范围全靠 search_flip_frames 控制
+  search_random_jump_chance: 0.03   # 找怪时随机跳跃概率（每帧），0=关闭
+  search_random_jump_cd: 45         # 跳跃冷却帧数，避免连跳
 
 route:
   climb_y_offset: 0.5                 # 爬梯Y偏移量（像素），改小=梯子更短

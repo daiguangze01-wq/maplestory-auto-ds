@@ -130,12 +130,20 @@ class GameWindowCapturor:
             # Only grab reference inside lock — convert outside
             frame_ref = self.frame
 
+        if frame_ref is None or getattr(frame_ref, "size", 0) == 0:
+            return None
+        if len(frame_ref.shape) < 3 or frame_ref.shape[0] <= 0 or frame_ref.shape[1] <= 0:
+            return None
+
         # Convert BGRA (mss format) to BGR outside lock (avoids blocking capture)
         title_bar_height = self.cfg["game_window"].get("title_bar_height", 0)
         if title_bar_height > 0:
-            return cv2.cvtColor(
-                frame_ref[title_bar_height:, :, :], cv2.COLOR_BGRA2BGR
-            )
+            if title_bar_height >= frame_ref.shape[0]:
+                return None
+            cropped = frame_ref[title_bar_height:, :, :]
+            if cropped is None or cropped.size == 0:
+                return None
+            return cv2.cvtColor(cropped, cv2.COLOR_BGRA2BGR)
         return cv2.cvtColor(frame_ref, cv2.COLOR_BGRA2BGR)
 
     def limit_fps(self):

@@ -82,9 +82,18 @@ monster_detect:
 # 方向攻击设置
 # ---------------------------------------------------------------------------
 directional_attack:
-  range_x: 350           # 水平攻击范围（像素）
+  range_x: 600           # 水平攻击范围（像素）
   range_y: 70            # 垂直攻击范围（像素）
   cooldown: 0.9          # 攻击冷却时间（秒）
+  search_enabled: true   # hunt模式且没怪时，是否左右移动找怪
+  search_trigger_frames: 4   # 连续多少帧没怪后开始左右搜索
+  search_flip_frames: 18      # 每多少帧切换一次左右方向
+  search_attack_while_move: true # 搜索移动中是否继续按攻击键
+  search_stall_frames: 8       # 连续多少帧几乎没水平位移，视为顶墙/卡住
+  search_stall_min_delta_px: 1.0 # 最小水平位移阈值（优先使用小地图坐标）
+  search_max_offset_px: 45     # 单边最多离开搜索起点多远，超出就反向；0=不限制
+  search_max_sweeps: 0         # 搜索换向次数上限，0=不限制
+  search_pause_frames: 12      # 达到上限后暂停多少帧再继续
 
 # ---------------------------------------------------------------------------
 # 范围技能设置
