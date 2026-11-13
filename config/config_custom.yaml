@@ -7,33 +7,37 @@ bot:
 system:
   fps_limit_main: 15
 
+game_window:
+  working_width: 1280         # 客户区等比缩放至此宽度，供识别和预览使用
+
 key:
-  directional_attack: "x"
-  aoe_skill: "a"
+  directional_attack: "s"
+  aoe_skill: "s"
   add_hp: "end"
   add_mp: "home"
 
 title:
+  template: "character/medal_green.png"
   enable: true
   mode: "grayscale"           # 当前这张 title.png 建议先用 grayscale；如果现场干扰多再切 white_mask
   manual_select: true          # 在监视器窗口里点击称号候选框，手动锁定自己的角色
   max_candidates: 8
-  candidate_threshold: 0.30
+  candidate_threshold: 0.055
   lock_miss_tolerance: 18
   manual_track_radius: 180
-  manual_track_threshold: 0.30
+  manual_track_threshold: 0.055
   offset: [0, -60]
-  match_threshold: 0.24        # 先收紧一点，减少误匹配；若经常 MISS 可放宽到 0.28~0.30
+  match_threshold: 0.045
   cache_ttl: 30                # 更频繁重搜，降低锁到错误 UI 文本的概率
   prev_search_radius: 180      # 优先在上次位置附近找，减少吸到其他玩家
   center_search_radius: 320    # 只在屏幕中部较大范围内做中心候选搜索
   center_accept_radius: 220    # 超出中心太远的候选直接拒绝
   max_jump_px: 140             # 新候选离上次位置太远时拒绝切换
   stick_to_prev_margin: 0.03   # 新候选没有明显更优时，继续沿用上次锁定
-  strong_match_threshold: 0.06 # 只有特别强的匹配才允许替换当前锁定
+  strong_match_threshold: 0.025
   white_lower: 185             # white_mask 模式备用参数
   white_upper: 255
-  blur_kernel: 3
+  blur_kernel: 1
 #  这个是魔法密林 北部2的 位置 先存下
 #  x: 10
 #  y: 149
@@ -41,24 +45,24 @@ title:
 #  height: 144
 ############################
 minimap:
-  x: 11
-  y: 152
-  width: 180
-  height: 142
-  player_color: [136, 255, 255]   # 玩家小黄点 BGR (#ffff88 → 136,255,255)
-  player_tolerance: 8            # 颜色容差起始值（会自动扩大到+30）
+  x: 6
+  y: 67
+  width: 230
+  height: 74
+  player_color: [65, 250, 250]   # 客户区缩放到 1280 宽后的小黄点 BGR
+  player_tolerance: 20
 
 monster_detect:
   # monsters: ["Octopus","lan_mo_gu"]
-  monsters: ["Ligator"]
+  monsters: ["ghost"]
   # monsters: ["black_axe_stump"]
   # monsters: ["OrangeMushroom2"]
   mode: "color"                     # color / grayscale / contour_only
-  diff_thres: 0.35                  # 匹配阈值 0.0~1.0（越小越严格）
-  scales: [1.25]                 # 缩放比例数组 [0.5~1.5]，素材不匹配时加多个: [0.8, 1.0, 1.2]
+  diff_thres: 0.10                  # 幽灵模板匹配阈值（越小越严格）
+  scales: [1.0]                     # 模板采自 1280 宽的检测画面
   display_scale: 0.47               # 监视器缩放 0.1~1.0（越小越流畅）
   detection_interval: 2             # 每N帧检测一次 1~5（1=每帧，越大越流畅）
-  with_enemy_hp_bar: true           # 通过怪物血条辅助检测（防掉落物遮挡）
+  with_enemy_hp_bar: false          # 仅按幽灵外观计数
   hp_bar_color: [0, 255, 0]         # 怪物血条 BGR 颜色（绿色）
   hp_bar_tolerance: 30              # 颜色容差（实际是0,243,0，容差30能匹配到）
 
@@ -82,7 +86,7 @@ route:
   climb_y_interval: 5             # 每N帧偏移一次，改大=梯子更短
 
 health_monitor:
-  enable: true
+  enable: false                    # 补血和补蓝由游戏内宠物负责
   enable_hp: true                  # HP 自动喝药开关（F2 切换）
   enable_mp: true                  # MP 自动回蓝开关（F3 切换）
   bar_count: 2                     # 083版本可能只有HP+MP两个条，没有EXP条

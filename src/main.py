@@ -98,13 +98,12 @@ def main():
     # Create keyboard controller for movement + listener for F1 toggle
     from src.input.KeyBoardController import KeyBoardController
     from src.input.KeyBoardListener import KeyBoardListener
-    kb = KeyBoardController(cfg)
+    logger.info("Starting game window capture...")
+    detector.start_capture()
+    kb = KeyBoardController(cfg, window_hwnd=detector.capture.hwnd)
     detector._kb = kb  # Wire to detector
     kb_listener = KeyBoardListener(cfg, is_autobot=True)
     kb_listener.register_func_key_handler('f1', kb.toggle)
-
-    logger.info("Starting game window capture...")
-    detector.start_capture()
 
     # -------------------------------------------------------------------
     # Start processing in background thread (matches reference: thread_auto_bot)

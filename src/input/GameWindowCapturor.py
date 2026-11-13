@@ -1,157 +1,116 @@
-"""
-Game window capturer for the "MapleStoryGo" game window on Windows.
-
-Uses mss for screen capture + win32gui for window locating.
-Pattern follows the macOS version in MapleStoryAutoLevelUp-main/src/input/GameWindowCapturorForMac.py
-"""
-import time
+"""Capture the game client in physical pixels and publish BGR detection frames."""
+import ctypes
+from ctypes.wintypes import RECT
 import threading
+import time
 
-import mss
 import cv2
-import numpy as np
 
+from src.utils.common import get_game_window_title_by_token, load_image
 from src.utils.logger import logger
-from src.utils.common import load_image, get_game_window_title_by_token
 
 
 class GameWindowCapturor:
-    """
-    Captures frames from the "MapleStoryGo" game window.
-
-    Uses mss (cross-platform screen capture) + win32gui (window location).
-    Capture runs in a daemon thread. Pattern matches the macOS reference.
-    """
-
-    def __init__(self, cfg: dict, test_image_path: str = ""):
-        self.cfg = cfg
+    def __init__(self, cfg, test_image_path=""):
         self.frame = None
-        self.lock = threading.Lock()
-        self.is_terminated = False
-
+        self.hwnd = None
+        self.window_title = ""
+        self._control = None
+        self._lock = threading.Lock()
+        self._last_size = None
+        settings = cfg["game_window"]
         if test_image_path:
-            # Offline test mode: load a static image
-            logger.info(f"[GameWindowCapturor] Test mode: loading {test_image_path}")
-            self.frame = load_image(test_image_path)
-            logger.info(f"[GameWindowCapturor] Test image loaded: {self.frame.shape}")
-            self.fps = 0
-            self.window_title = ""
+            image = load_image(test_image_path)
+            self.frame = image[settings.get("title_bar_height", 0):]
             return
 
-        # Live capture mode
         import win32gui
-        self._win32gui = win32gui
+        from windows_capture import WindowsCapture
 
-        self.window_title = get_game_window_title_by_token(cfg["game_window"]["title"])
-        if not self.window_title:
-            logger.error(
-                f"[GameWindowCapturor] Unable to find window containing "
-                f"'{cfg['game_window']['title']}'"
-            )
+        token = settings["title"]
+        self.window_title = get_game_window_title_by_token(token)
+        self.hwnd = win32gui.FindWindow(None, self.window_title) if self.window_title else None
+        if not self.hwnd:
+            raise RuntimeError(f"No visible game window matching '{token}'")
+        self._win = win32gui
+        self._working_width = int(settings.get("working_width", 0))
+        self._min_interval = 1.0 / max(1, cfg["system"]["fps_limit_window_capturor"])
+        self._last_frame_time = 0.0
+        capture = WindowsCapture(window_hwnd=self.hwnd, cursor_capture=False)
+        capture.frame_handler = self._on_frame
+        capture.closed_handler = self._clear_frame
+        self._control = capture.start_free_threaded()
+        logger.info(f"[Capture] Windows Graphics Capture: '{self.window_title}'")
+
+    def _clear_frame(self):
+        with self._lock:
             self.frame = None
+
+    def _client_pixels(self, pixels):
+        """Match this WGC surface to its physical DWM or window bounds before cropping."""
+        win, hwnd = self._win, self.hwnd
+        left, top = win.ClientToScreen(hwnd, (0, 0))
+        _, _, width, height = win.GetClientRect(hwnd)
+        frame_h, frame_w = pixels.shape[:2]
+        if width <= 0 or height <= 0:
+            return None
+        if (width, height) == (frame_w, frame_h):
+            return pixels
+        rect = RECT()
+        result = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)  # DWMWA_EXTENDED_FRAME_BOUNDS
+        )
+        bounds = win.GetWindowRect(hwnd)
+        if result == 0 and (rect.right - rect.left, rect.bottom - rect.top) == (frame_w, frame_h):
+            bounds = (rect.left, rect.top, rect.right, rect.bottom)
+        x, y = left - bounds[0], top - bounds[1]
+        if ((bounds[2] - bounds[0], bounds[3] - bounds[1]) != (frame_w, frame_h)
+                or x < 0 or y < 0 or x + width > frame_w or y + height > frame_h):
+            return None  # Window resized between frame delivery and geometry lookup.
+        return pixels[y:y + height, x:x + width]
+
+    def _on_frame(self, frame, control):
+        now = time.monotonic()
+        if now - self._last_frame_time < self._min_interval:
             return
-
-        logger.info(f"[GameWindowCapturor] Found window: '{self.window_title}'")
-
-        self.fps = 0
-        self.fps_limit = cfg["system"]["fps_limit_window_capturor"]
-        self.t_last_run = 0.0
-
-        # Use mss to capture the screen region
-        self.capture = mss.mss()
-
-        # Get initial window region
-        self.update_window_region()
-
-        # Start capture in daemon thread (matches macOS reference exactly)
-        threading.Thread(target=self.start_capture, daemon=True).start()
-
-        # Busy-wait for first frame (matches macOS reference exactly)
-        time.sleep(0.1)
-        while self.frame is None:
-            self.limit_fps()
-
-    def start_capture(self):
-        """Capture loop — runs in daemon thread."""
-        while not self.is_terminated:
-            self.update_window_region()
-            self.capture_frame()
-            self.limit_fps()
-
-    def stop(self):
-        """Stop the capture thread."""
-        self.is_terminated = True
-        logger.info("[GameWindowCapturor] Terminated")
-
-    def update_window_region(self):
-        """Update the game window's screen region."""
+        self._last_frame_time = now
+        user32 = ctypes.windll.user32
+        # Coordinates must use physical pixels even if pyautogui set process DPI awareness.
+        previous = user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4))
         try:
-            hwnd = self._win32gui.FindWindow(None, self.window_title)
-            if hwnd:
-                left, top, right, bottom = self._win32gui.GetWindowRect(hwnd)
-                self.region = {
-                    "left": left,
-                    "top": top,
-                    "width": right - left,
-                    "height": bottom - top,
-                }
-            else:
-                self.region = None
-        except Exception:
-            self.region = None
-
-        if self.region is None:
-            logger.error(f"Cannot find window: {self.window_title}")
-            # Don't raise — keep trying on next iteration
-
-    def capture_frame(self):
-        """Capture the current game window region."""
-        if self.region is None:
-            return
-
-        try:
-            img = self.capture.grab(self.region)
-            frame = np.array(img)
-            with self.lock:
-                self.frame = frame
-        except Exception as e:
-            logger.debug(f"[GameWindowCapturor] grab error: {e}")
+            if self._win.IsIconic(self.hwnd):
+                self._clear_frame()
+                return
+            client = self._client_pixels(frame.frame_buffer)
+            if client is None:
+                self._clear_frame()
+                return
+            height, width = client.shape[:2]
+            if self._working_width > 0 and width != self._working_width:
+                target = (self._working_width, max(1, round(height * self._working_width / width)))
+                interpolation = cv2.INTER_AREA if width > self._working_width else cv2.INTER_LINEAR
+                client = cv2.resize(client, target, interpolation=interpolation)
+            bgr = cv2.cvtColor(client, cv2.COLOR_BGRA2BGR)
+            size = (width, height, bgr.shape[1], bgr.shape[0])
+            if size != self._last_size:
+                logger.info(f"[Capture] Client {width}x{height} -> detection {size[2]}x{size[3]}")
+                self._last_size = size
+            with self._lock:
+                self.frame = bgr
+        except self._win.error:
+            self._clear_frame()
+        finally:
+            if previous:
+                user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(previous))
 
     def get_frame(self):
-        """
-        Thread-safe getter for the latest game frame.
+        if self.hwnd and (not self._win.IsWindow(self.hwnd) or self._win.IsIconic(self.hwnd)):
+            self._clear_frame()
+        with self._lock:
+            return self.frame
 
-        Returns:
-            BGR numpy array, or None if no frame is available.
-        """
-        with self.lock:
-            if self.frame is None:
-                return None
-            # Only grab reference inside lock — convert outside
-            frame_ref = self.frame
-
-        if frame_ref is None or getattr(frame_ref, "size", 0) == 0:
-            return None
-        if len(frame_ref.shape) < 3 or frame_ref.shape[0] <= 0 or frame_ref.shape[1] <= 0:
-            return None
-
-        # Convert BGRA (mss format) to BGR outside lock (avoids blocking capture)
-        title_bar_height = self.cfg["game_window"].get("title_bar_height", 0)
-        if title_bar_height > 0:
-            if title_bar_height >= frame_ref.shape[0]:
-                return None
-            cropped = frame_ref[title_bar_height:, :, :]
-            if cropped is None or cropped.size == 0:
-                return None
-            return cv2.cvtColor(cropped, cv2.COLOR_BGRA2BGR)
-        return cv2.cvtColor(frame_ref, cv2.COLOR_BGRA2BGR)
-
-    def limit_fps(self):
-        """Limit FPS to save system resources."""
-        target_duration = 1.0 / self.fps_limit
-        frame_duration = time.time() - self.t_last_run
-        if frame_duration < target_duration:
-            time.sleep(target_duration - frame_duration)
-
-        self.fps = round(1.0 / max(time.time() - self.t_last_run, 0.001))
-        self.t_last_run = time.time()
+    def stop(self):
+        if self._control is not None and not self._control.is_finished():
+            self._control.stop()
+        self._control = None
+        self._clear_frame()

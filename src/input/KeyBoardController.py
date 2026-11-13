@@ -126,12 +126,13 @@ class KeyBoardController():
     the current movement/action command to the game window.
     """
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, window_hwnd=None):
         self.cfg = cfg
         self._command = ("none", "none", "none")
         self._last_face = None
         self._last_action = None
         self.window_title = cfg["game_window"]["title"]
+        self.window_hwnd = window_hwnd
         self.fps = 0  # Frame per seconds
 
         # Timers
@@ -244,6 +245,8 @@ class KeyBoardController():
                 hwnd = win32gui.GetForegroundWindow()
                 if not hwnd:
                     return False
+                if self.window_hwnd is not None:
+                    return hwnd == self.window_hwnd
                 title = win32gui.GetWindowText(hwnd)
                 return self.window_title in title
             except Exception:

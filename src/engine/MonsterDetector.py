@@ -103,12 +103,19 @@ class MonsterDetector:
         # Load title template for player detection
         self.img_title = None
         self.img_title_gray = None
-        if os.path.exists("character/title.png"):
-            self.img_title = load_image("character/title.png")
-            self.img_title_gray = load_image("character/title.png", cv2.IMREAD_GRAYSCALE)
-            logger.info(f"  Loaded title template: {self.img_title.shape[1]}x{self.img_title.shape[0]}")
+        self.title_mask = None
+        title_path = cfg.get("title", {}).get("template", "character/title.png")
+        if os.path.exists(title_path):
+            self.img_title = load_image(title_path, cv2.IMREAD_UNCHANGED)
+            if self.img_title.ndim == 3 and self.img_title.shape[2] == 4:
+                alpha = self.img_title[:, :, 3]
+                if np.any(alpha == 0):
+                    self.title_mask = np.ascontiguousarray(alpha)
+            self.img_title_gray = (self.img_title if self.img_title.ndim == 2 else
+                                   cv2.cvtColor(self.img_title, cv2.COLOR_BGR2GRAY))
+            logger.info(f"  Loaded title template: {title_path} {self.img_title.shape[1]}x{self.img_title.shape[0]}")
         else:
-            logger.warning("  No character/title.png found, player will stay at frame center")
+            logger.warning(f"  Missing player title template: {title_path}")
 
         # Timers
         self.t_last_frame = time.time()
@@ -595,7 +602,7 @@ class MonsterDetector:
         if h_pat > h_img or w_pat > w_img:
             return []
 
-        result = cv2.matchTemplate(img_roi, img_pat, cv2.TM_SQDIFF_NORMED)
+        result = cv2.matchTemplate(img_roi, img_pat, cv2.TM_SQDIFF_NORMED, mask=self.title_mask)
         result = np.nan_to_num(result, nan=1.0, posinf=1.0, neginf=1.0)
         work = result.copy()
         suppress_x = max(12, w_pat // 2)
@@ -815,7 +822,7 @@ class MonsterDetector:
                     search_img = img_roi[y0:y1, x0:x1]
                     x_off, y_off = x0, y0
 
-            result = cv2.matchTemplate(search_img, img_pat, cv2.TM_SQDIFF_NORMED)
+            result = cv2.matchTemplate(search_img, img_pat, cv2.TM_SQDIFF_NORMED, mask=self.title_mask)
             result = np.nan_to_num(result, nan=1.0, posinf=1.0, neginf=1.0)
 
             flat = result.reshape(-1)
@@ -943,13 +950,11 @@ class MonsterDetector:
             # Candidate 3: global fallback only for recovery when there is no active lock.
             best_local_score = min([c["score"] for c in candidates], default=1.0)
             if not manual_locked and not had_lock and best_local_score > match_threshold * 0.9:
-                global_cand = _biased_sqdiff_match(
-                    img_roi_proc, img_title_proc,
-                    anchor=center_anchor,
-                    radius=None,
-                    bias_weight=center_bias_weight,
-                )
+                # The candidate pool already contains the global score minimum.
+                global_cand = candidate_pool[0].copy() if candidate_pool else None
                 if global_cand is not None:
+                    gx, gy = global_cand["loc"]
+                    global_cand["center_dist_px"] = np.hypot(gx - center_anchor[0], gy - center_anchor[1])
                     global_cand["src"] = "global"
                     global_cand["jump_px"] = 0.0
                     candidates.append(global_cand)
@@ -966,7 +971,9 @@ class MonsterDetector:
                     center_dist_px = cand.get("center_dist_px", 0.0)
                     jump_px = cand.get("jump_px", 0.0)
 
-                    if src != "prev" and center_dist_px > center_accept_radius:
+                    strong_global = (src == "global" and not had_lock
+                                     and cand["score"] < strong_match_threshold)
+                    if src != "prev" and not strong_global and center_dist_px > center_accept_radius:
                         rejected.append((src, "far_from_center", round(center_dist_px, 1), round(cand["score"], 4)))
                         continue
                     if had_lock and src != "prev" and jump_px > max_jump_px:
@@ -1030,13 +1037,16 @@ class MonsterDetector:
                 logger.info(f"[Title] Rejected candidates: {rejected[:3]}")
 
         if score < match_threshold or match_src in ("prev_keep", "manual", "manual_hold"):
+            observed = match_src not in ("prev_keep", "manual_hold")
             # Anti-jump guard: reject sudden large jumps unless score is very confident.
             if self.loc_title is not None and match_src not in ("prev_keep", "manual_hold"):
                 jump = ((loc[0] - self.loc_title[0]) ** 2 + (loc[1] - self.loc_title[1]) ** 2) ** 0.5
                 if jump > max_jump_px and score > max(0.04, match_threshold * 0.45):
                     loc = self.loc_title
+                    observed = False
             self.loc_title = loc
-            self._title_last_seen_frame = self.frame_count
+            if observed:
+                self._title_last_seen_frame = self.frame_count
             if 'candidate_pool' in locals() and 'tw' in locals() and 'th' in locals():
                 self._update_title_candidates_snapshot(candidate_pool, (tw, th))
             tw, th = self.img_title.shape[1], self.img_title.shape[0]
@@ -1272,6 +1282,11 @@ class MonsterDetector:
         """Draw the player position marker on the debug frame."""
         if self.img_frame_debug is None:
             return
+        if self._title_last_seen_frame != self.frame_count:
+            label = "Player: last seen" if self.loc_title is not None else "Player: not located"
+            cv2.putText(self.img_frame_debug, label, (10, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 180, 255), 2)
+            return
         cv2.circle(
             self.img_frame_debug,
             self.loc_player, radius=5,
@@ -1403,7 +1418,7 @@ class MonsterDetector:
                 f"Global: ({gx},{gy}) MM:({mx},{my}) PMM:{self.loc_player_minimap or '?'} Match:{getattr(self,'_last_match_score',1):.3f}",
                 f"Ladder: {self.is_on_ladder} | Map: {self.img_map.shape[1]}x{self.img_map.shape[0]}" if self.img_map is not None else "No map loaded",
             ]
-        texts += ["S=shot C/RClick=clear-title Q=quit F1=toggle"]
+        texts += ["F1=keyboard ON/OFF  F11=HUNT/DETECT", "S=shot C/RClick=clear-title Q=quit"]
 
         # Bottom-left positioning (matches reference project)
         text_y_interval = 25
@@ -1453,9 +1468,12 @@ class MonsterDetector:
         # Capture frame
         self.img_frame = self.get_img_frame()
         if self.img_frame is None:
-            logger.warning("Failed to capture game frame. Waiting...")
-            if is_windows():
-                activate_game_window(self.capture.window_title)
+            if self._kb:
+                self._kb.set_command("stop stop stop")
+            if self.health_monitor:
+                self.health_monitor.update_frame(None)
+            if self.frame_count % 60 == 1:
+                logger.warning("Waiting for a game frame. Check that the game window is open and restored.")
             return -1
 
         # Convert to grayscale (for title detection + grayscale matching)

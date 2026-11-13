@@ -27,15 +27,11 @@ class KeyBoardListener():
         self.cfg = cfg
         self.t_last_run = time.time()
         self.is_enable = True
-        self.debounce_interval = 1  # second
         self.is_terminated = False
         self.fps = 0
         self.fps_limit = 30
         self.key_pressing = []  # keys currently pressed by user
         self.is_pressed_func_key = [False] * 12  # 'F1'...'F12'
-
-        # Timer
-        self.t_func_key = [0] * 12
 
         # Keys
         self.movement_keys = {
@@ -77,9 +73,8 @@ class KeyBoardListener():
             self.window_title = cfg["game_window"]["title"]
             threading.Thread(target=self.run_for_route_recorder, daemon=True).start()
 
-        listener = keyboard.Listener(on_press=self.on_press,
-                                     on_release=self.on_release)
-        listener.start()
+        self.listener = keyboard.Listener(on_press=self.on_press, on_release=self.on_release)
+        self.listener.start()
 
     def do_nothing(self):
         pass
@@ -93,7 +88,9 @@ class KeyBoardListener():
             logger.warning(f"[KeyBoardListener] '{key}' is not a supported function key.")
 
     def on_release(self, key):
-        if key in self.movement_keys:
+        if key in self.func_keys:
+            self.is_pressed_func_key[self.func_keys[key]] = False
+        elif key in self.movement_keys:
             try:
                 self.key_pressing.remove(self.movement_keys[key])
             except ValueError:
@@ -108,7 +105,6 @@ class KeyBoardListener():
                 idx = self.func_keys[key]  # 0-based index
                 if not self.is_pressed_func_key[idx]:
                     self.is_pressed_func_key[idx] = True
-                    self.t_func_key[idx] = time.time()
                     handler = self.func_key_handlers[f"f{idx + 1}"]
                     if handler:
                         try:
@@ -130,6 +126,7 @@ class KeyBoardListener():
 
     def stop(self):
         self.is_terminated = True
+        self.listener.stop()
 
     def is_game_window_active(self):
         if is_mac():

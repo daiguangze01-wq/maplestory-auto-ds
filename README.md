@@ -31,6 +31,10 @@ game_window:
 
 3. 启动（游戏窗口要保持在前台，程序只在游戏窗口是前台时才发按键）：
 
+   Windows 实时采集通过游戏窗口句柄获取客户区画面，支持副屏和窗口遮挡。当前配置的
+   `game_window.working_width` 为 1280，检测坐标按这个宽度等比换算后的画面标定。
+   启动日志中的 `Client ... -> detection ...` 显示原始客户区和检测画面的尺寸。
+
 ```powershell
 # 方式一：双击 run.bat，或命令行
 run.bat

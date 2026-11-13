@@ -32,6 +32,7 @@ def _install_null_logger():
 _install_null_logger()
 
 from src.input import KeyBoardController as kbc  # noqa: E402
+from src.input import KeyBoardListener as kbl  # noqa: E402
 
 
 class KeyStateTrackerTest(unittest.TestCase):
@@ -210,6 +211,28 @@ class KeyStateTrackerTest(unittest.TestCase):
             ("up", "left"), ("down", "z"), ("up", "z"),
             ("down", "z"), ("up", "z"), ("down", "right"),
         ])
+
+
+class HotkeyTest(unittest.TestCase):
+    def test_release_rearms_only_that_function_key(self):
+        with patch.object(kbl.keyboard, "Listener") as hook, patch.object(kbl.threading.Thread, "start"):
+            listener = kbl.KeyBoardListener()
+        toggle, switch = Mock(), Mock()
+        listener.register_func_key_handler("f1", toggle)
+        listener.register_func_key_handler("f11", switch)
+        f1, f11 = kbl.keyboard.Key.f1, kbl.keyboard.Key.f11
+        listener.on_press(f1)
+        listener.on_press(f11)
+        listener.on_release(f11)
+        listener.on_press(f11)
+        listener.on_press(f1)  # OS repeat while held
+        toggle.assert_called_once()
+        self.assertEqual(switch.call_count, 2)
+        listener.on_release(f1)
+        listener.on_press(f1)
+        self.assertEqual(toggle.call_count, 2)
+        listener.stop()
+        hook.return_value.stop.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -369,11 +369,16 @@ if is_windows():
         Returns:
             The full window title, or empty string if not found.
         """
+        if not token.strip():
+            return ""
+        exact = win32gui.FindWindow(None, token)
+        if exact and win32gui.IsWindowVisible(exact):
+            return win32gui.GetWindowText(exact)
         result = ""
 
         def callback(hwnd, _):
             nonlocal result
-            if win32gui.IsWindowVisible(hwnd):
+            if not result and win32gui.IsWindowVisible(hwnd):
                 title = win32gui.GetWindowText(hwnd)
                 if token.lower() in title.lower():
                     result = title
