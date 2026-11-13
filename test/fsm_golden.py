@@ -1,0 +1,16 @@
+"""FSM golden 基准（由重构前的实现生成，勿手改）。
+
+来源：git 298009b 的 ``src/engine/MonsterDetector`` 在
+``test/fsm_scenarios.py`` 场景集上逐帧跑出的 (move_x, move_y, action) 序列。
+
+生成方式：临时脚本导入 git HEAD 版本的 MonsterDetector，用它的
+``_get_in_place_command`` / ``_get_hunt_search_command`` / 决策块生成，
+gzip + base64 后内联到这里（原始 JSON 68KB，压缩后约 1.1KB）。
+
+如果**故意**改变了行为（不是重构），需要重新生成基准；如果只是重构，
+这个文件必须保持不变，``test/test_character_fsm.py`` 会逐帧比对。
+"""
+
+GOLDEN_B64 = (
+    "H4sIAAAAAAAEAO2cz1KjQBCHX8XinEMSXVc97WGv+wRWihphjKzApIDUalm++5pokESIA2LSwHcx5ddk+E2nu+cPkzw5qVkmnnaunFDPlfd48sfEaaaT3zrTXmaSk18n8yA7mV5ejMeXN87IST0dqyQwqXN1/eTEKlq9119f7UbG16tLtPadq8nIyQLv/uW60/HI8SJ/9Y5rJzbx6priy2wEBsvEs+dRHuVB7C5C5Wk30SrMgug91qd5rE+mFsF+u2ok1LfZu01lmfLu361JML8rN2+3qUx1k0XTbntmrycQiEAEIhCBCEQgAhGIQAT2QGDpcsZ79MKXvyZaJDpNX9Yzm2XNab6smY6LyxqLzmDFivVL1opKIh7v1J3W+bbD2sUyIwEr1uFY5VQy6p7kOMGKtU9WOZWMuic5TrBi7ZNVTiWj7kmOE6ytWItbwItlki61GwUPhV3fs3zX96LDZ1ls9uOthe13bGNtexqzKkX1wqEtafaNESQECUFCkBAkAwqS4vwi1Srx7j6el/1R8WDZSsZn+DvnzV/Bf5fRQoYSMBgMprKBwWAwlQ0MBoOHjKn2x8AlG0arzaLEvQ2DhbPZMjrPt4zOurxlRIiBwWAwGMx0DwxuD3/3kUQ4/AA8L8xC9MDh8O5y6gkcDv+Uy5nJg8GtYTY6wGAwGCwXM0q1hqXNq+Hw3vOSc0w3Zhn72+eYfvbjHBMYDAaDwXIxSwowGAwGM+6AwWAw+JiYsQEMBlNPwGAwuG+YigwGgykz4HJcclQozVQYOptTQhdD/IHsHIs61tWAdzV9pflxKF/fkuZH/N4NLseT+L0LWJof8ftBeeOfQZDjyU76nXjvGJfjSfzeBdxWncXvxPsRcMlu1EIt09UFr7tRl/lu1GmXd6ME7riAwWAwGCwOM16CwbZY2uICXso7tziHw+Gd49QZOBwOt+TF/8GvWM7qBtx5zHZOZ3HJE7pExb6J3PWHunlONxnz45Lg4WAqGhgMBoPB4FfMrAAMBoPBjDtgMBgMBoPBYDB44JilChgMBgvHTQp18bBQYpaZdqPgQftOfkpoUu/r/LfK0+72jVSWKe9+bf3kOOdydTpJmS3mm3+xRZd3Wi7cs0yRqRS7K8muvXo9LHXWWz8LTVn21JTpnRsVttvFt9vYHci1dpddHzMd6oVJMosGa/S31HH5xVahauWyViK2SQ+PnpRNAkxSTjaNV1k5aROqojKy4mIycjDDZD13kZQ9TsqGASYhJ3cv7XZODnmYbDo572VGdmWYLI+yfg2UQ05K6x42Ci7yse187P+09VDZuO8W4rNR/hBZy2UkZf+Tcu+Eog8jpPyctJmdk5GDyUjRk9a67hKQlBWBzNz160nZJMAOlZPFp7+h8n2duOuHwE7++HeaP/6dbD3+re3Itbrqj3vv22rfDHWoQx3qUIc61KEOdSLVfTx8GBt3kZh5otPUyeegp/kc9Lx6ClqhHCwZ89UCMFgqnj3Pnv8DUqSAzvQJAQA="
+)

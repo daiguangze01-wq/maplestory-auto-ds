@@ -12,7 +12,6 @@ import time
 
 # Library import
 import pyautogui
-from pynput import keyboard
 
 try:
     import pydirectinput
@@ -29,8 +28,6 @@ if is_windows():
 
 if is_mac():
     import Quartz
-else:
-    import pygetwindow as gw
 
 pyautogui.PAUSE = 0  # remove delay
 
@@ -38,6 +35,7 @@ pyautogui.PAUSE = 0  # remove delay
 # thread, so without this lock a potion press can interleave with an attack or
 # movement transition and leave DirectInput in an inconsistent key state.
 _INPUT_LOCK = threading.RLock()
+_PRESSED_KEYS = set()
 
 
 def _norm_key(key):
@@ -53,40 +51,45 @@ def _norm_key(key):
     return alias.get(k, k)
 
 
-def key_down(key):
-    """Press key down (scan-code based for DirectInput games)."""
+def get_pressed_keys():
+    """Snapshot for the display thread, including any tap currently in flight."""
+    return sorted(_PRESSED_KEYS.copy())
+
+
+def _set_key_state(key, down):
+    """Send one transition and remember it only after the backend succeeds."""
     if not key:
-        return
+        return False
+    key = _norm_key(key)
     with _INPUT_LOCK:
+        if (key in _PRESSED_KEYS) == down:
+            return True
         try:
-            if HAS_PYDIRECTINPUT and not is_mac():
-                k = _norm_key(key)
-                if k in pydirectinput.KEYBOARD_MAPPING:
-                    pydirectinput.keyDown(k)
-                    return
-            pyautogui.keyDown(key)
-        except pyautogui.FailSafeException:
-            logger.error("[KeyBoardController] FailSafe triggered: mouse in corner.")
+            if HAS_PYDIRECTINPUT and not is_mac() and key in pydirectinput.KEYBOARD_MAPPING:
+                send = pydirectinput.keyDown if down else pydirectinput.keyUp
+                if not send(key):
+                    return False
+            else:
+                if not pyautogui.isValidKey(key):
+                    return False
+                send = pyautogui.keyDown if down else pyautogui.keyUp
+                send(key)
         except Exception as e:
-            logger.error(f"[KeyBoardController] key_down({key}) failed: {e}")
+            logger.error(f"[KeyBoardController] Key transition failed ({key}, down={down}): {e}")
+            return False
+        if down:
+            _PRESSED_KEYS.add(key)
+        else:
+            _PRESSED_KEYS.remove(key)
+        return True
+
+
+def key_down(key):
+    return _set_key_state(key, True)
 
 
 def key_up(key):
-    """Release key (scan-code based for DirectInput games)."""
-    if not key:
-        return
-    with _INPUT_LOCK:
-        try:
-            if HAS_PYDIRECTINPUT and not is_mac():
-                k = _norm_key(key)
-                if k in pydirectinput.KEYBOARD_MAPPING:
-                    pydirectinput.keyUp(k)
-                    return
-            pyautogui.keyUp(key)
-        except pyautogui.FailSafeException:
-            logger.error("[KeyBoardController] FailSafe triggered: mouse in corner.")
-        except Exception as e:
-            logger.error(f"[KeyBoardController] key_up({key}) failed: {e}")
+    return _set_key_state(key, False)
 
 
 def recover_mouse():
@@ -99,13 +102,22 @@ def recover_mouse():
 
 
 def press_key(key, duration=0.05):
-    """Press a key for a short duration via the active key backend."""
+    """Tap a key, restoring a movement hold if the bindings overlap."""
     if not key:
-        return
+        return False
     with _INPUT_LOCK:
-        key_down(key)
-        time.sleep(duration)
-        key_up(key)
+        was_held = _norm_key(key) in _PRESSED_KEYS
+        if was_held and not key_up(key):
+            return False
+        if not key_down(key):
+            return False
+        try:
+            time.sleep(duration)
+        finally:
+            success = key_up(key)
+            if was_held and success:
+                success = key_down(key)
+        return success
 
 
 class KeyBoardController():
@@ -116,12 +128,9 @@ class KeyBoardController():
 
     def __init__(self, cfg):
         self.cfg = cfg
-        self.cmd_action = "none"
-        self.cmd_up_down = "none"
-        self.cmd_left_right = "none"
-        self.cmd_up_down_last = ""
-        self.cmd_left_right_last = ""
-        self.cmd_action_last = ""
+        self._command = ("none", "none", "none")
+        self._last_face = None
+        self._last_action = None
         self.window_title = cfg["game_window"]["title"]
         self.fps = 0  # Frame per seconds
 
@@ -179,10 +188,12 @@ class KeyBoardController():
 
     def toggle_enable(self):
         """Toggle keyboard control on/off."""
-        self.is_enable = not self.is_enable
-        logger.info(f"KB toggled, is_enable: {self.is_enable}")
-        # Make sure all keys are released
-        self.release_all_key()
+        with _INPUT_LOCK:
+            if self.is_enable:
+                self.disable()
+            else:
+                self.enable()
+            logger.info(f"KB toggled, is_enable: {self.is_enable}")
 
     def toggle(self):
         """Alias of toggle_enable (used by main.py F1 handler)."""
@@ -190,24 +201,28 @@ class KeyBoardController():
 
     def disable(self):
         """Disable keyboard controller."""
-        self.is_enable = False
-        self.release_all_key()
+        with _INPUT_LOCK:
+            self.is_enable = False
+            self.release_all_key()
 
     def enable(self):
         """Enable keyboard controller."""
-        self.is_enable = True
+        with _INPUT_LOCK:
+            self.is_enable = True
 
     def stop(self):
         """Stop the controller thread and release all keys."""
-        self.is_terminated = True
-        self.release_all_key()
+        with _INPUT_LOCK:
+            self.is_terminated = True
+            self.release_all_key()
 
     def set_command(self, new_command):
         """
         Set keyboard command. Format: "<left_right> <up_down> <action>"
         e.g. "left none jump", "stop stop stop", "none none attack"
         """
-        self.cmd_left_right, self.cmd_up_down, self.cmd_action = new_command.split()
+        move_x, move_y, action = new_command.split()
+        self._command = (move_x, move_y, action)
 
     def is_game_window_active(self):
         """Check if the game window is currently the foreground window."""
@@ -235,13 +250,14 @@ class KeyBoardController():
                 return False
 
     def release_all_key(self):
-        """Release all movement keys and the attack key."""
+        """Leave the current action and release exactly the keys we own."""
         with _INPUT_LOCK:
-            key_up("left")
-            key_up("right")
-            key_up("up")
-            key_up("down")
-            key_up(self.attack_key)
+            for key in get_pressed_keys():
+                key_up(key)
+            self._last_face = None
+            self._last_action = None
+
+    pressed_keys = staticmethod(get_pressed_keys)
 
     def press_key_safe(self, key, duration=0.05, action_name="key"):
         """Press only while this controller and the game window are active.
@@ -249,23 +265,15 @@ class KeyBoardController():
         HealthMonitor uses this method instead of the module-level press_key so
         potion and return-home actions can never leak into another application.
         """
-        if self.is_terminated or not self.is_enable:
-            logger.debug(f"[KeyBoardController] Skipped {action_name}: controller disabled")
-            return False
-        if not self.is_game_window_active():
-            logger.warning(
-                f"[KeyBoardController] Skipped {action_name}: game window not focused"
-            )
-            return False
         with _INPUT_LOCK:
-            # Re-check after waiting for another input sequence to finish.
+            if self.is_terminated or not self.is_enable:
+                return False
             if not self.is_game_window_active():
                 logger.warning(
                     f"[KeyBoardController] Skipped {action_name}: focus changed"
                 )
                 return False
-            press_key(key, duration)
-        return True
+            return press_key(key, duration)
 
     def limit_fps(self):
         """Cap loop rate to fps_limit."""
@@ -276,167 +284,133 @@ class KeyBoardController():
         self.fps = round(1.0 / max(time.time() - self.t_last_run, 0.001))
         self.t_last_run = time.time()
 
+    def _apply_movement(self, move_x, move_y):
+        """Release obsolete keys before establishing either axis of a new hold."""
+        held = []
+        face = None
+        if move_x in ("left", "right"):
+            held.append(move_x)
+        elif move_x in ("face_left", "face_right"):
+            face = move_x[len("face_"):]
+        elif move_x not in ("none", "stop"):
+            logger.error(f"[KeyBoardController] Unsupported horizontal command: {move_x}")
+        if move_y in ("up", "down"):
+            held.append(move_y)
+        elif move_y not in ("none", "stop"):
+            logger.error(f"[KeyBoardController] Unsupported vertical command: {move_y}")
+
+        for key in sorted(_PRESSED_KEYS.difference(held)):
+            if not key_up(key):
+                return False
+        for key in held:
+            if not key_down(key):
+                return False
+        if face != self._last_face:
+            if face and not press_key(face, duration=0.03):
+                return False
+            self._last_face = face
+        return True
+
+    def _apply_action(self, action):
+        if self.is_need_force_heal:
+            press_key(self.cfg["key"]["add_hp"])
+            self._last_action = None
+            return
+        if action in ("attack", "aoe"):
+            now = time.time()
+            if action == "attack" and now - self.t_last_attack >= self.attack_cooldown:
+                if press_key(self.attack_key):
+                    self.t_last_attack = self.t_last_skill = now
+            elif action == "aoe" and now - self.t_last_aoe >= self.aoe_cooldown:
+                if press_key(self.aoe_key):
+                    self.t_last_aoe = self.t_last_skill = now
+        elif action != self._last_action:
+            keys = self.cfg["key"]
+            if action in ("double_jump", "double_teleport"):
+                key = keys[action[len("double_"):]]
+                duration = 0.06 if action == "double_jump" else 0.05
+                if not press_key(key, duration):
+                    return
+                time.sleep(0.05)
+                if not self.press_key_safe(key, duration, action):
+                    return
+            elif action in ("jump", "teleport", "add_hp", "add_mp"):
+                duration = 0.08 if action == "jump" else 0.05
+                if not press_key(keys[action], duration):
+                    return
+            elif action not in ("goal", "none", "stop"):
+                logger.error(f"[KeyBoardController] Unsupported action command: {action}")
+        self._last_action = action
+
+    def _pickup(self):
+        """Pause horizontal movement for pickup. The next tick restores current intent."""
+        with _INPUT_LOCK:
+            for key in ("left", "right"):
+                if not key_up(key):
+                    return
+        for _ in range(self.pickup_taps):
+            if not self.press_key_safe(self.pickup_key, duration=0.04, action_name="pickup"):
+                return
+            time.sleep(0.09)
+        logger.info(f"[Pickup] Tapped pickup key '{self.pickup_key}' x{self.pickup_taps}")
+        self.t_last_pickup = self.t_last_skill = time.time()
+
+    def _tick(self):
+        """Apply the latest complete command while input is enabled and focused."""
+        with _INPUT_LOCK:
+            if self.is_terminated or not self.is_enable or not self.is_game_window_active():
+                self.release_all_key()
+                return False
+
+            for i, buff_key in enumerate(self.buff_keys):
+                cooldown = self.buff_cooldowns[i] if i < len(self.buff_cooldowns) else 60
+                now = time.time()
+                if (now - self.t_last_buff_cast[i] >= cooldown
+                        and now - self.t_last_skill > self.buff_action_cooldown):
+                    if self.press_key_safe(buff_key, action_name="buff"):
+                        logger.info(f"[Buff] Press buff skill key: '{buff_key}'")
+                        self.t_last_buff_cast[i] = self.t_last_skill = time.time()
+                    break
+
+            pickup_due = (self.pickup_key and self.pickup_interval > 0
+                          and time.time() - self.t_last_pickup >= self.pickup_interval)
+            if not pickup_due:
+                move_x, move_y, action = self._command
+                if self._apply_movement(move_x, move_y):
+                    self._apply_action(action)
+                return True
+
+        self._pickup()
+        return True
+
     def run(self):
         """Main control loop (daemon thread)."""
         t_last_inactive_warn = 0.0
         t_last_activate_attempt = 0.0
-        was_window_active = False
-        while not self.is_terminated:
-            if not self.is_enable:
+        try:
+            while not self.is_terminated:
+                active = self._tick()
+                if not active and self.is_enable and not self.is_terminated:
+                    # Auto-pull the game window back to the foreground instead of
+                    # silently dropping all keys. Throttled to avoid spamming.
+                    now = time.time()
+                    if self.auto_focus and is_windows() and self.window_title and \
+                            now - t_last_activate_attempt > self.focus_retry_seconds:
+                        activate_game_window(self.window_title)
+                        t_last_activate_attempt = now
+                    if now - t_last_inactive_warn > 5.0:
+                        focus_msg = (
+                            "Trying to re-activate the game window..."
+                            if self.auto_focus else
+                            "Automation is paused until the game regains focus."
+                        )
+                        logger.warning(
+                            "[KeyBoardController] Game window not focused "
+                            f"(is_enable={self.is_enable}) — keys are NOT being sent. "
+                            f"{focus_msg}"
+                        )
+                        t_last_inactive_warn = now
                 self.limit_fps()
-                continue
-
-            window_active = self.is_game_window_active()
-            if not window_active:
-                if was_window_active:
-                    self.release_all_key()
-                    self.cmd_left_right_last = ""
-                    self.cmd_up_down_last = ""
-                    self.cmd_action_last = ""
-                    logger.warning(
-                        "[KeyBoardController] Game focus lost; all held keys released."
-                    )
-                was_window_active = False
-                # Auto-pull the game window back to the foreground instead of
-                # silently dropping all keys. Throttled to avoid spamming.
-                now = time.time()
-                if self.auto_focus and is_windows() and self.window_title and \
-                        now - t_last_activate_attempt > self.focus_retry_seconds:
-                    activate_game_window(self.window_title)
-                    t_last_activate_attempt = now
-                if now - t_last_inactive_warn > 5.0:
-                    focus_msg = (
-                        "Trying to re-activate the game window..."
-                        if self.auto_focus else
-                        "Automation is paused until the game regains focus."
-                    )
-                    logger.warning(
-                        "[KeyBoardController] Game window not focused "
-                        f"(is_enable={self.is_enable}) — keys are NOT being sent. "
-                        f"{focus_msg}"
-                    )
-                    t_last_inactive_warn = now
-                self.limit_fps()
-                continue
-            was_window_active = True
-
-            # Optional buff skills
-            for i, buff_skill_key in enumerate(self.buff_keys):
-                cooldown = self.buff_cooldowns[i] if i < len(self.buff_cooldowns) else 60
-                if time.time() - self.t_last_buff_cast[i] >= cooldown and \
-                        time.time() - self.t_last_skill > self.buff_action_cooldown:
-                    press_key(buff_skill_key)
-                    logger.info(f"[Buff] Press buff skill key: '{buff_skill_key}'")
-                    self.t_last_buff_cast[i] = time.time()
-                    self.t_last_skill = time.time()
-                    break
-
-            # Force heal
-            if self.is_need_force_heal:
-                self.cmd_action = "add_hp"
-
-            # ---------------- Periodic loot pickup ----------------
-            if self.pickup_key and self.pickup_interval > 0 and \
-                    time.time() - self.t_last_pickup >= self.pickup_interval:
-                # Stop attacking briefly, then tap the pickup key a few times
-                key_up(self.attack_key)
-                key_up("left")
-                key_up("right")
-                for _ in range(self.pickup_taps):
-                    press_key(self.pickup_key, duration=0.04)
-                    time.sleep(0.09)
-                logger.info(f"[Pickup] Tapped pickup key '{self.pickup_key}' x{self.pickup_taps}")
-                self.t_last_pickup = time.time()
-                self.t_last_skill = time.time()
-                self.cmd_action = "none"
-
-            # ---------------- Left-Right ----------------
-            if self.cmd_left_right == "left":
-                key_up("right")
-                key_down("left")
-            elif self.cmd_left_right == "right":
-                key_up("left")
-                key_down("right")
-            elif self.cmd_left_right in ("face_left", "face_right"):
-                # Turn to face direction without walking: tap the arrow key once.
-                face_key = "left" if self.cmd_left_right == "face_left" else "right"
-                opposite_key = "right" if face_key == "left" else "left"
-                key_up(opposite_key)
-                if self.cmd_left_right_last != self.cmd_left_right:
-                    press_key(face_key, duration=0.03)
-            elif self.cmd_left_right == "stop":
-                key_up("left")
-                key_up("right")
-            elif self.cmd_left_right == "none":
-                if self.cmd_left_right_last not in ("none",):
-                    key_up("left")
-                    key_up("right")
-            else:
-                logger.error("[KeyBoardController] Unsupported left-right command: "
-                             f"{self.cmd_left_right}")
-            self.cmd_left_right_last = self.cmd_left_right
-
-            # ---------------- Up-Down ----------------
-            if self.cmd_up_down == "up":
-                key_up("down")
-                key_down("up")
-            elif self.cmd_up_down == "down":
-                key_up("up")
-                key_down("down")
-            elif self.cmd_up_down == "stop":
-                key_up("up")
-                key_up("down")
-            elif self.cmd_up_down == "none":
-                if self.cmd_up_down_last != "none":
-                    key_up("up")
-                    key_up("down")
-            else:
-                logger.error("[KeyBoardController] Unsupported up-down command: "
-                             f"{self.cmd_up_down}")
-            self.cmd_up_down_last = self.cmd_up_down
-
-            # ---------------- Action ----------------
-            if self.cmd_action == "jump":
-                if self.cmd_action_last != "jump":
-                    logger.info(f"[Jump] Pressing jump key "
-                                f"'{self.cfg['key'].get('jump', '?')}'")
-                press_key(self.cfg["key"]["jump"], duration=0.08)
-            elif self.cmd_action == "double_jump":
-                press_key(self.cfg["key"]["jump"], duration=0.06)
-                time.sleep(0.05)
-                press_key(self.cfg["key"]["jump"], duration=0.06)
-            elif self.cmd_action == "teleport":
-                press_key(self.cfg["key"]["teleport"])
-            elif self.cmd_action == "double_teleport":
-                press_key(self.cfg["key"]["teleport"])
-                time.sleep(0.05)
-                press_key(self.cfg["key"]["teleport"])
-            elif self.cmd_action == "attack":
-                now = time.time()
-                if now - self.t_last_attack >= self.attack_cooldown:
-                    press_key(self.attack_key)
-                    self.t_last_attack = now
-                    self.t_last_skill = now
-            elif self.cmd_action == "aoe":
-                now = time.time()
-                if self.aoe_key and now - self.t_last_aoe >= self.aoe_cooldown:
-                    press_key(self.aoe_key)
-                    self.t_last_aoe = now
-                    self.t_last_skill = now
-            elif self.cmd_action == "add_hp":
-                press_key(self.cfg["key"]["add_hp"])
-                self.cmd_action = "none"
-            elif self.cmd_action == "add_mp":
-                press_key(self.cfg["key"]["add_mp"])
-                self.cmd_action = "none"
-            elif self.cmd_action in ("goal", "none", "stop"):
-                pass
-            else:
-                logger.error("[KeyBoardController] Unsupported action command: "
-                             f"{self.cmd_action}")
-            self.cmd_action_last = self.cmd_action
-
-            self.limit_fps()
-
-        self.release_all_key()
-        logger.info("[KeyBoardController] terminated")
+        finally:
+            self.release_all_key()
+            logger.info("[KeyBoardController] terminated")

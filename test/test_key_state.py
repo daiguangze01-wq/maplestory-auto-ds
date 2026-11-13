@@ -1,0 +1,216 @@
+"""键盘按下状态追踪的单元测试（打桩，不真的发按键、不写日志）。
+
+运行：
+    .\\.venv\\Scripts\\python.exe test\\test_key_state.py -v
+"""
+import os
+import sys
+import types
+import unittest
+from unittest.mock import Mock, call, patch
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _p in (BASE_DIR, os.path.dirname(os.path.abspath(__file__))):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+
+def _install_null_logger():
+    if "src.utils.logger" in sys.modules:
+        return
+    mod = types.ModuleType("src.utils.logger")
+
+    class _NullLogger:
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    mod.logger = _NullLogger()
+    mod.MSLogger = object
+    sys.modules["src.utils.logger"] = mod
+
+
+_install_null_logger()
+
+from src.input import KeyBoardController as kbc  # noqa: E402
+
+
+class KeyStateTrackerTest(unittest.TestCase):
+    def setUp(self):
+        self.events = []
+        for stub in (
+            patch.object(kbc, "HAS_PYDIRECTINPUT", False),
+            patch.object(kbc.pyautogui, "keyDown", side_effect=lambda k: self.events.append(("down", k))),
+            patch.object(kbc.pyautogui, "keyUp", side_effect=lambda k: self.events.append(("up", k))),
+            patch.object(kbc.time, "sleep"),
+        ):
+            stub.start()
+            self.addCleanup(stub.stop)
+        kbc._PRESSED_KEYS.clear()
+        self.addCleanup(kbc._PRESSED_KEYS.clear)
+
+        with patch.object(kbc.threading.Thread, "start"):
+            self.kb = kbc.KeyBoardController({
+                "game_window": {"title": "test"},
+                "key": {"directional_attack": "x", "aoe_skill": "a", "jump": "alt",
+                        "teleport": "e", "add_hp": "end", "add_mp": "home"},
+                "bot": {"attack": "directional"},
+            })
+        self.kb.is_game_window_active = lambda: True
+
+    def tick(self, command):
+        self.kb.set_command(command)
+        self.kb._tick()
+
+    def test_tracks_down_and_up(self):
+        self.assertEqual(kbc.get_pressed_keys(), [])
+        kbc.key_down("left")
+        kbc.key_down("up")
+        self.assertEqual(kbc.get_pressed_keys(), ["left", "up"])
+        kbc.key_up("left")
+        self.assertEqual(kbc.get_pressed_keys(), ["up"])
+
+    def test_repeated_key_down_keeps_single_entry(self):
+        kbc.key_down("left")
+        kbc.key_down("left")
+        self.assertEqual(kbc.get_pressed_keys(), ["left"])
+        self.assertEqual(self.events, [("down", "left")])
+
+    def test_press_key_is_transient(self):
+        kbc.press_key("alt", duration=0)
+        self.assertEqual(kbc.get_pressed_keys(), [], "press_key 结束后不应残留按下状态")
+        self.assertEqual(self.events, [("down", "alt"), ("up", "alt")])
+
+    def test_key_up_unknown_key_is_noop(self):
+        kbc.key_up("numpad5")
+        self.assertEqual(kbc.get_pressed_keys(), [])
+        self.assertEqual(self.events, [])
+
+    def test_release_all_clears_tracked_transients(self):
+        kbc.key_down("left")
+        kbc.key_down("alt")          # 模拟持续按住中的瞬时键（异常情况）
+        self.events.clear()
+        self.kb.release_all_key()
+        self.kb.release_all_key()
+
+        self.assertEqual(kbc.get_pressed_keys(), [])
+        self.assertCountEqual(self.events, [("up", "left"), ("up", "alt")])
+
+    def test_idle_walk_reverse_stop(self):
+        for command in ("none none none", "left none none", "left none none",
+                        "right none none", "stop stop stop", "stop stop stop"):
+            self.tick(command)
+        self.assertEqual(self.events, [
+            ("down", "left"), ("up", "left"), ("down", "right"), ("up", "right"),
+        ])
+
+    def test_turn_and_tap_while_climbing(self):
+        self.tick("right up none")
+        self.events.clear()
+        for _ in range(3):
+            self.tick("face_left up jump")
+        self.assertEqual(self.events, [
+            ("up", "right"), ("down", "left"), ("up", "left"),
+            ("down", "alt"), ("up", "alt"),
+        ])
+        self.assertEqual(self.kb.pressed_keys(), ["up"])
+        self.events.clear()
+        self.tick("none down none")
+        self.tick("face_left down jump")
+        self.assertEqual(self.events, [
+            ("up", "up"), ("down", "down"), ("down", "left"), ("up", "left"),
+            ("down", "alt"), ("up", "alt"),
+        ])
+
+    def test_double_actions_fire_once_on_entry(self):
+        for action, key in (("double_jump", "alt"), ("double_teleport", "e")):
+            with self.subTest(action=action):
+                self.events.clear()
+                self.tick(f"none none {action}")
+                self.tick(f"none none {action}")
+                self.assertEqual(self.events, [("down", key), ("up", key)] * 2)
+
+    def test_attack_cooldowns_with_held_movement(self):
+        for action, key in (("attack", "x"), ("aoe", "a")):
+            with self.subTest(action=action):
+                self.tick("left none none")
+                self.events.clear()
+                with patch.object(kbc.time, "time", return_value=100) as now:
+                    self.tick(f"left none {action}")
+                    self.tick(f"left none {action}")
+                    now.return_value += 2
+                    self.tick(f"left none {action}")
+                self.assertEqual(self.events, [("down", key), ("up", key)] * 2)
+
+    def test_focus_pause_resume_and_shutdown(self):
+        self.tick("right none none")
+        self.kb.is_game_window_active = lambda: False
+        self.kb._tick()
+        self.tick("left none none")
+        self.kb.is_game_window_active = lambda: True
+        self.kb._tick()
+        self.kb.disable()
+        self.kb._tick()
+        self.kb.enable()
+        self.kb._tick()
+        self.kb.stop()
+        self.kb._tick()
+        self.assertEqual(self.events, [
+            ("down", "right"), ("up", "right"), ("down", "left"), ("up", "left"),
+            ("down", "left"), ("up", "left"),
+        ])
+
+    def test_failed_release_is_retried_before_reversal(self):
+        self.tick("left none none")
+        with patch.object(kbc.pyautogui, "keyUp", side_effect=OSError):
+            self.tick("right none attack")
+        self.assertEqual(self.kb.pressed_keys(), ["left"])
+        self.tick("right none attack")
+        self.assertEqual(self.events, [
+            ("down", "left"), ("up", "left"), ("down", "right"),
+            ("down", "x"), ("up", "x"),
+        ])
+
+    def test_directinput_failure_does_not_commit_transition(self):
+        backend = Mock(KEYBOARD_MAPPING={"left": 1})
+        backend.keyDown.side_effect = [False, True]
+        backend.keyUp.side_effect = [False, True]
+        with patch.multiple(kbc, HAS_PYDIRECTINPUT=True, pydirectinput=backend,
+                            is_mac=lambda: False, create=True):
+            self.tick("left none none")
+            self.assertEqual(self.kb.pressed_keys(), [])
+            self.tick("left none none")
+            self.assertEqual(self.kb.pressed_keys(), ["left"])
+            self.tick("stop stop stop")
+            self.assertEqual(self.kb.pressed_keys(), ["left"])
+            self.tick("stop stop stop")
+            self.assertEqual(self.kb.pressed_keys(), [])
+        self.assertEqual(backend.method_calls, [
+            call.keyDown("left"), call.keyDown("left"), call.keyUp("left"), call.keyUp("left"),
+        ])
+
+    def test_health_tap_with_shared_movement_binding_restores_hold(self):
+        self.tick("left none none")
+        self.assertTrue(self.kb.press_key_safe("left", action_name="HP potion"))
+        self.tick("left none none")
+        self.assertEqual(self.events, [
+            ("down", "left"), ("up", "left"), ("down", "left"),
+            ("up", "left"), ("down", "left"),
+        ])
+
+    def test_pickup_releases_and_resumes_current_direction(self):
+        self.tick("left up none")
+        self.kb.pickup_key = "z"
+        self.kb.pickup_taps = 2
+        self.kb.pickup_interval = 60
+        self.kb.t_last_pickup = 0
+        self.events.clear()
+        self.kb._tick()
+        self.tick("right up none")
+        self.assertEqual(self.events, [
+            ("up", "left"), ("down", "z"), ("up", "z"),
+            ("down", "z"), ("up", "z"), ("down", "right"),
+        ])
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
