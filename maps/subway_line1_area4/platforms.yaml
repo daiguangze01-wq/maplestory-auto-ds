@@ -45,6 +45,8 @@ extra_landmarks:
     - [3225,376]
     - [3289,290]
     - [3385,434]
+# These floors span the map and have no exposed platform ends.
+full_width_floors: [ground, track]
 # x start, x end, standing y. Split the upper walkway at its gap.
 platforms:
   upper_left: [360, 905, 210]

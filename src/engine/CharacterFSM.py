@@ -51,6 +51,7 @@ class Perception:
     chase_visible: bool = False
     approach_direction: str = "none"
     ladder_command: Optional[Command] = None
+    platform_center_direction: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,7 @@ class Command:
     move_y: str = "none"
     action: str = "none"
     state: str = STATE_IDLE
+    attack_step: Optional[str] = None
 
 
 class CharacterFSM:
@@ -140,6 +142,7 @@ class CharacterFSM:
             self._advance_state(p.ladder_command.state)
             return p.ladder_command
         move_x, move_y, action = "none", "none", "none"
+        attack_step = None
         route_move_x, route_move_y = "none", "none"
 
         # ① 路线命令作为基础层（detect 模式下也会照发，与原实现一致）
@@ -150,13 +153,12 @@ class CharacterFSM:
 
         # ② 按优先级覆盖
         if p.single_platform or p.chase_visible:
-            # Turning to attack is allowed. Suppress periodic walks, route
-            # commands and searching so a ledge near its edge stays occupied.
             active = p.mode == "hunt" and p.monster_count > 0
             move_x = (f"face_{p.facing}" if active and p.facing in ("left", "right")
                       and p.attack_style == "directional" else "none")
             move_y, action = "none", "none"
             if active:
+                attack_step = p.platform_center_direction
                 threshold = self.cfg.get("directional_attack", {}).get("aoe_monster_count", 3)
                 action = "aoe" if p.monster_count >= threshold else "attack"
             new_state = STATE_COMBAT_IN_PLACE if active else STATE_IDLE
@@ -196,7 +198,8 @@ class CharacterFSM:
         if (p.monster_count <= 0 or p.mode != "hunt") and action in ("attack", "aoe"):
             action = "none"
         self._advance_state(new_state)
-        return Command(move_x=move_x, move_y=move_y, action=action, state=self.state)
+        return Command(move_x=move_x, move_y=move_y, action=action, state=self.state,
+                       attack_step=attack_step)
 
     def _advance_state(self, new_state: str):
         if new_state == self.state:

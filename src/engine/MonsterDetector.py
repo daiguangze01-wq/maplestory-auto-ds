@@ -1596,6 +1596,8 @@ class MonsterDetector:
         self.img_frame = self.get_img_frame()
         if self.img_frame is None:
             if self.ladder_nav:
+                if self.ladder_nav.grabbing:
+                    logger.warning("[Ladder] Frame capture failed during traversal; sending stop")
                 self.ladder_nav.reset()
             self.visible_ghosts = []
             self.player_feet = self.platform_offset = self.loc_player_minimap = None
@@ -1730,6 +1732,7 @@ class MonsterDetector:
         # Monster detection — frame skipping for performance
         # ---------------------------------------------------------------
         interval = self.cfg["monster_detect"].get("detection_interval", 2)
+        floor = None
         if self.survey:
             floor = self.survey.platform_at(self.player_feet, self.platform_offset)
             near = []
@@ -1772,7 +1775,6 @@ class MonsterDetector:
             self.attack_targets = []
         single_platform = self.cfg.get("single_platform", False)
         if single_platform:
-            floor = self.survey.platform_at(self.player_feet, self.platform_offset)
             if floor and self.locked_platform is None:
                 self.locked_platform = floor
                 logger.info(f"[Hunt] Locked platform: {floor}")
@@ -1849,6 +1851,8 @@ class MonsterDetector:
             chase_visible=self.chase_visible,
             approach_direction=approach,
             ladder_command=ladder_command,
+            platform_center_direction=(self.survey.attack_step(floor, self.player_feet, self.platform_offset)
+                                       if floor and self.attack_targets else None),
         )
         previous_state = self.fsm.state
         command = self.fsm.tick(perception)
@@ -1856,7 +1860,8 @@ class MonsterDetector:
             if self.ladder_nav and perception.mode != "hunt":
                 self._kb.set_command("stop stop stop")
             else:
-                self._kb.set_command(f"{command.move_x} {command.move_y} {command.action}")
+                self._kb.set_command(f"{command.move_x} {command.move_y} {command.action}",
+                                     attack_step=command.attack_step)
             if self.ladder_nav and command.state != previous_state and (
                     ladder_command or previous_state in ("WALK_TO_LADDER", "CLIMB", "WALK_TO_DROP",
                                                           "DROP_THROUGH", "LADDER_RETRY", "WAIT_FOR_FOOTING")):
@@ -1869,6 +1874,7 @@ class MonsterDetector:
                     f"scan={self.scan_scope if self.survey else 'local'} player={self.position_source} "
                     f"in_range={perception.monster_count} state={command.state} "
                     f"dispatch=({command.move_x},{command.move_y},{command.action}) "
+                    f"attack_step={command.attack_step} "
                     f"on_ladder={self.is_on_ladder} input={self._kb.input_status} "
                     f"held={self._kb.pressed_keys()}"
                 )

@@ -104,6 +104,15 @@ class PlatformSurvey:
                       if left <= x <= right and -8 <= top - y <= (34 if ghost else 12)]
         return candidates[0] if len(candidates) == 1 else None
 
+    def attack_step(self, floor, feet, offset):
+        if floor is None or floor in self.data.get("full_width_floors", ()):
+            return None
+        left, right, _ = self.data["platforms"][floor]
+        dx = (left + right) / 2 - (feet[0] - offset[0])
+        if abs(dx) <= 20:
+            return None
+        return "right" if dx > 0 else "left"
+
     def feet(self, player):
         if player is None:
             return None

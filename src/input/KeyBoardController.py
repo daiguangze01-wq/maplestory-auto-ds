@@ -22,6 +22,7 @@ except ImportError:
     HAS_PYDIRECTINPUT = False
 
 # Local import
+from src.engine.LadderNavigator import CLIMB_PROTECTION_SECONDS
 from src.utils.logger import logger
 from src.utils.common import is_mac, is_windows
 if is_windows():
@@ -151,10 +152,11 @@ class KeyBoardController():
 
     def __init__(self, cfg, window_hwnd=None):
         self.cfg = cfg
-        self._command = ("none", "none", "none")
+        self._command = ("none", "none", "none", None)
         self._last_face = None
         self._last_action = None
         self._climb_until = 0.0
+        self._up_pressed_at = None
         self._ladder_side_until = 0.0
         self.jump_attack = cfg["bot"].get("jump_attack", False)
         self.jump_attack_interval = float(cfg["bot"].get("jump_attack_interval", 0.65))
@@ -229,7 +231,7 @@ class KeyBoardController():
         """Disable keyboard controller."""
         with _INPUT_LOCK:
             self.is_enable = False
-            self.release_all_key()
+            self.release_all_key("keyboard disabled")
 
     def enable(self):
         """Enable keyboard controller."""
@@ -240,15 +242,15 @@ class KeyBoardController():
         """Stop the controller thread and release all keys."""
         with _INPUT_LOCK:
             self.is_terminated = True
-            self.release_all_key()
+            self.release_all_key("controller stopped")
 
-    def set_command(self, new_command):
+    def set_command(self, new_command, *, attack_step=None):
         """
         Set keyboard command. Format: "<left_right> <up_down> <action>"
         e.g. "left none jump", "stop stop stop", "none none attack"
         """
         move_x, move_y, action = new_command.split()
-        self._command = (move_x, move_y, action)
+        self._command = (move_x, move_y, action, attack_step)
 
     def is_game_window_active(self):
         """Check if the game window is currently the foreground window."""
@@ -277,12 +279,23 @@ class KeyBoardController():
             except Exception:
                 return False
 
-    def release_all_key(self):
+    def _release_held_key(self, key, reason):
+        released = key_up(key)
+        if key == "up" and self._up_pressed_at is not None:
+            elapsed = (time.perf_counter() - self._up_pressed_at) * 1000
+            if released:
+                logger.info(f"[LadderInput] Up released after {elapsed:.0f} ms; reason={reason}")
+                self._up_pressed_at = None
+            else:
+                logger.warning(f"[LadderInput] Up release failed after {elapsed:.0f} ms; reason={reason}")
+        return released
+
+    def release_all_key(self, reason="release all"):
         """Leave the current action and release exactly the keys we own."""
         with _INPUT_LOCK:
             self._climb_until = 0.0
             for key in get_pressed_keys():
-                key_up(key)
+                self._release_held_key(key, reason)
             self._last_face = None
             self._last_action = None
 
@@ -339,11 +352,13 @@ class KeyBoardController():
                 # starting a new attack hold even when both skills share S.
                 desired.discard(_norm_key(attack))
         for key in sorted(_PRESSED_KEYS - desired):
-            if not key_up(key):
+            if not self._release_held_key(key, f"apply {move_x} {move_y} {action}"):
                 return False
         for key in held:
             if not key_down(key):
                 return False
+            if key == "up" and self._up_pressed_at is None:
+                self._up_pressed_at = time.perf_counter()
         if face:
             if face != self._last_face and not press_key(face, duration=0.03):
                 return False
@@ -357,18 +372,46 @@ class KeyBoardController():
             self.t_last_skill = time.time()
         return True
 
-    def _apply_action(self, action):
+    def _jump_and_attack(self, step):
+        now = time.monotonic()
+        if now < self._next_jump_attack or self._command[2] not in ("attack", "aoe"):
+            return
+        self._next_jump_attack = now + self.jump_attack_interval
+        if step and not key_down(step):
+            return
+        try:
+            if step:
+                self._last_face = step
+                if self._command[2] not in ("attack", "aoe"):
+                    return
+            if not self.press_key_safe(self.cfg["key"]["jump"], 0.08, "jump attack"):
+                return
+            # The detector may withdraw the target or update its side during C.
+            facing, _, action, latest_step = self._command
+            if action not in ("attack", "aoe"):
+                return
+            turn = facing[len("face_"):] if facing in ("face_left", "face_right") else None
+            needs_turn = turn is not None and turn != step
+            if step and (latest_step != step or needs_turn):
+                if not key_up(step):
+                    return
+                if needs_turn:
+                    if not self.press_key_safe(turn, 0.03, "turn toward target"):
+                        return
+                    self._last_face = turn
+                action = self._command[2]
+                if action not in ("attack", "aoe"):
+                    return
+            key = self.attack_key if action == "attack" else self.aoe_key
+            if self.press_key_safe(key, 0.06, "airborne attack"):
+                self.t_last_skill = time.time()
+        finally:
+            if step:
+                key_up(step)
+
+    def _apply_action(self, action, attack_step=None):
         if self.jump_attack and action in ("attack", "aoe"):
-            now = time.monotonic()
-            if now >= self._next_jump_attack:
-                self._next_jump_attack = now + self.jump_attack_interval
-                if self.press_key_safe(self.cfg["key"]["jump"], 0.08, "jump attack"):
-                    # The detector can withdraw the attack while C is down.
-                    current = self._command[2]
-                    if current in ("attack", "aoe"):
-                        key = self.attack_key if current == "attack" else self.aoe_key
-                        if self.press_key_safe(key, 0.06, "airborne attack"):
-                            self.t_last_skill = time.time()
+            self._jump_and_attack(attack_step)
             self._last_action = action
             return
         if action != self._last_action:
@@ -407,20 +450,20 @@ class KeyBoardController():
         with _INPUT_LOCK:
             if self.is_terminated or not self.is_enable:
                 self.input_status = "Paused"
-                self.release_all_key()
+                self.release_all_key(self.input_status)
                 return False
             if self.game_has_higher_integrity:
                 self.input_status = "Game has higher Windows privileges"
-                self.release_all_key()
+                self.release_all_key(self.input_status)
                 return False
             if not self.is_game_window_active():
                 self.input_status = "Waiting for game focus"
-                self.release_all_key()
+                self.release_all_key(self.input_status)
                 return False
             self.input_status = "Ready"
 
-            if self._command == ("stop", "stop", "stop"):
-                self.release_all_key()
+            if self._command[:3] == ("stop", "stop", "stop"):
+                self.release_all_key("stop command")
                 return True
             if self._climb_until:
                 now = time.monotonic()
@@ -441,7 +484,7 @@ class KeyBoardController():
             pickup_due = (self.pickup_key and self.pickup_interval > 0
                           and time.time() - self.t_last_pickup >= self.pickup_interval)
             if not pickup_due:
-                move_x, move_y, action = self._command
+                move_x, move_y, action, attack_step = self._command
                 if self.is_need_force_heal:
                     action = "add_hp"
                     self._last_action = None
@@ -462,23 +505,28 @@ class KeyBoardController():
                         self._ladder_side_until = time.monotonic() + 0.20
                         if (self._command[2] != action or not self.is_game_window_active()
                                 or not self._apply_holds(horizontal, "up", "none")):
-                            self.release_all_key()
+                            self.release_all_key("grab entry cancelled or key transition failed")
                             return False
                         time.sleep(0.007)
                         takeoff = time.monotonic()
                         if (self._command[2] == "stop" or not self.press_key_safe(
                                 self.cfg["key"]["jump"], 0.03, "ladder jump")):
-                            self.release_all_key()
+                            self.release_all_key("stop command or ladder jump not sent")
                             return False
                         self._last_action = action
-                        self._climb_until = takeoff + 1.0
+                        self._climb_until = takeoff + CLIMB_PROTECTION_SECONDS
                         logger.info(f"[LadderInput] Jump sent with Up held; horizontal={horizontal}")
                     if self._command[2] != "stop" and self.is_game_window_active():
                         return self._hold_ladder(time.monotonic())
-                    self.release_all_key()
+                    self.release_all_key("stop command or focus lost after ladder jump")
                     return False
+                if attack_step and action in ("attack", "aoe"):
+                    if self.jump_attack:
+                        move_x = "none"  # Apply the step only for the duration of this strike.
+                    elif move_x in ("none", f"face_{attack_step}"):
+                        move_x = attack_step
                 if self._apply_holds(move_x, move_y, action):
-                    self._apply_action(action)
+                    self._apply_action(action, attack_step)
                 elif self.input_status == "Ready":
                     self.input_status = "Key transition failed"
                 return True
@@ -487,7 +535,7 @@ class KeyBoardController():
         return True
 
     def _hold_ladder(self, now):
-        horizontal, _, action = self._command
+        horizontal, _, action, _ = self._command
         if action != "grab_ladder" or horizontal not in ("left", "right") or now >= self._ladder_side_until:
             horizontal = "none"
         return self._apply_holds(horizontal, "up", "none")
@@ -521,5 +569,5 @@ class KeyBoardController():
                         t_last_inactive_warn = now
                 self.limit_fps()
         finally:
-            self.release_all_key()
+            self.release_all_key("keyboard loop exited")
             logger.info("[KeyBoardController] terminated")

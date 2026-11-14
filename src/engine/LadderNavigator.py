@@ -4,6 +4,8 @@ from itertools import count
 
 from src.engine.CharacterFSM import Command
 
+CLIMB_PROTECTION_SECONDS = 1.2
+
 
 class LadderNavigator:
     def __init__(self, profile):
@@ -48,7 +50,7 @@ class LadderNavigator:
 
     def climb_protected(self, now):
         return (self.grabbing and self.edge["kind"] == "climb"
-                and now - self.grab_started < 1.0)
+                and now < self.grab_started + CLIMB_PROTECTION_SECONDS)
 
     def _traversal_command(self):
         if self.edge["kind"] == "drop":

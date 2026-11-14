@@ -48,7 +48,8 @@ class _KBStub:
         self.is_enable = True
         self.input_status = "Ready"
 
-    def set_command(self, cmd: str):
+    def set_command(self, cmd: str, *, attack_step=None):
+        assert attack_step is None, "stationary mode must not step toward a platform center"
         self.commands.append(cmd)
 
     def pressed_keys(self):
@@ -123,11 +124,11 @@ class FsmIntegrationTest(unittest.TestCase):
         detector.is_show_debug = False
         detector._kb = _KBStub()
         # Synthetic player at (400, 300). Include the boundary, exclude the search margin.
-        inside = {"name": "ghost", "position": (640, 440), "size": (20, 20)}
-        outside_x = dict(inside, position=(641, 440))
-        outside_y = dict(inside, position=(640, 441))
-        upper_edge = dict(inside, position=(390, 140))
-        above_edge = dict(inside, position=(390, 139))
+        inside = {"name": "ghost", "position": (590, 390), "size": (20, 20)}
+        outside_x = dict(inside, position=(591, 390))
+        outside_y = dict(inside, position=(590, 391))
+        upper_edge = dict(inside, position=(390, 190))
+        above_edge = dict(inside, position=(390, 189))
         detector.get_monsters_in_range = Mock(side_effect=[
             [inside, outside_x, outside_y], [outside_x, outside_y], [], [upper_edge], [above_edge],
         ])

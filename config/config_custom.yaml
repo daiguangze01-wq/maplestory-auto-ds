@@ -76,8 +76,8 @@ monster_detect:
   hp_bar_tolerance: 30              # 颜色容差（实际是0,243,0，容差30能匹配到）
 
 directional_attack:
-  range_x: 250                     # 左右各 250，攻击框总宽 500（1280 宽检测画面）
-  range_y: 150                     # 上下各 150，攻击框总高 300
+  range_x: 200                     # 左右各 200，攻击框总宽 400（1280 宽检测画面）
+  range_y: 100                     # 上下各 100，攻击框总高 200
   attack_in_place: true            # 原地攻击：不移动持续攻击（刷固定点用）
   aoe_monster_count: 3             # 识别怪物>=此数量时使用群攻
   in_place_walk_interval: 300      # 原地攻击时每隔多少帧左右走动一次（防攻击失效）

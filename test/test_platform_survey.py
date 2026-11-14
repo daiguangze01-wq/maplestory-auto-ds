@@ -103,7 +103,7 @@ class PlatformSurveyTest(unittest.TestCase):
         detector = self.detector
         detector.get_img_frame = Mock(return_value=self.frame)
         detector._kb = Mock()
-        # Both ghosts fit within the 500x300 attack rectangle around (430,350).
+        # Both the ledge and lower ghosts fit in the attack rectangle around (430,350).
         ledge = dict(position=(445, 320), size=(50, 40))
         upper = dict(position=(439, 168), size=(36, 40))
         lower = dict(position=(545, 375), size=(50, 40))
@@ -138,6 +138,26 @@ class PlatformSurveyTest(unittest.TestCase):
             detector.run_once()
             self.assertEqual(detector._kb.set_command.call_args.args, ("face_right none attack",))
 
+    def test_attack_steps_toward_current_ledge_center_in_both_hunt_modes(self):
+        for single in (True, False):
+            d = MonsterDetector(dict(self.detector.cfg, single_platform=single))
+            d.load_monster_images()
+            d.get_img_frame = Mock(return_value=self.frame)
+            d._kb = Mock(input_status="Ready")
+            dx = 180
+            ghost = dict(position=(405 + dx, 320), size=(50, 40))
+            def locate():
+                d.loc_player = (foot_x + dx, 350)
+                d._title_last_seen_frame = d.frame_count
+            with patch.object(d, "_detect_player_by_title", side_effect=locate), patch.object(
+                    d.survey, "register", return_value=(dx, 0)), patch.object(d.survey, "scan", return_value=[ghost]):
+                for foot_x, step in ((370, "right"), (425, None), (475, "left")):
+                    with self.subTest(single=single, foot_x=foot_x):
+                        d.run_once()
+                        args = d._kb.set_command.call_args
+                        self.assertEqual(args.args[0].split()[2], "attack")
+                        self.assertEqual(args.kwargs["attack_step"], step)
+
     def test_visible_chase_walk_then_attack_then_stop(self):
         cfg = self.detector.cfg.copy()
         cfg["single_platform"] = False
@@ -154,9 +174,10 @@ class PlatformSurveyTest(unittest.TestCase):
             detector.run_once()
             self.assertEqual(len(detector.visible_ghosts), 4)
             self.assertEqual(detector._kb.set_command.call_args.args, ("right none none",))
-            foot_x = 735
+            foot_x = 785
             detector.run_once()
             self.assertEqual(detector._kb.set_command.call_args.args, ("face_right none attack",))
+            self.assertIsNone(detector._kb.set_command.call_args.kwargs["attack_step"])
             with patch.object(detector.survey, "scan", return_value=[]):
                 detector.run_once()
                 self.assertEqual(detector._kb.set_command.call_args.args, ("none none none",))
@@ -243,7 +264,7 @@ class PlatformSurveyTest(unittest.TestCase):
                 y = landing_y
                 clock.return_value += 0.4
                 d.run_once()
-                clock.return_value += 0.7
+                clock.return_value += 0.85
                 d.run_once()
                 self.assertIsNone(d.ladder_nav.edge)
                 if entrance != 1272:
@@ -309,7 +330,7 @@ class PlatformSurveyTest(unittest.TestCase):
             detector.run_once()
             self.assertEqual((detector.scan_scope, scan.call_count), ("full", 2))
             full = detector.visible_ghosts
-            feet_x = 735
+            feet_x = 785
             scan.reset_mock()
             detector.run_once()
             self.assertEqual((detector.scan_scope, scan.call_count), ("near", 1))
@@ -348,8 +369,9 @@ class PlatformSurveyTest(unittest.TestCase):
         self.assertEqual(nav.tick("track",(620,675),{"upper_left"},0.6).state,"CLIMB")
         self.assertEqual(nav.tick(None,None,set(),0.8).action,"grab_ladder")
         self.assertEqual(nav.tick(None,None,set(),1.2).state, "CLIMB")
-        self.assertIsNone(nav.tick(None,None,set(),1.5))
-        self.assertEqual(nav.tick("track",(620,675),{"upper_left"},1.6).move_x, "right")
+        self.assertEqual(nav.tick(None,None,set(),1.6).state, "CLIMB")
+        self.assertIsNone(nav.tick(None,None,set(),1.66))
+        self.assertEqual(nav.tick("track",(620,675),{"upper_left"},1.7).move_x, "right")
         self.assertEqual(nav.edge["x"], 1398)
 
     def test_minimap_position_requires_one_live_dot_and_correct_map(self):
@@ -368,7 +390,8 @@ class PlatformSurveyTest(unittest.TestCase):
         self.assertEqual(nav.tick("ground",(961,553),{"lower"},0).state, "CLIMB")
         self.assertEqual(nav.tick("ground",(961,553),{"lower"},0.2).state, "CLIMB")
         self.assertEqual(nav.tick("ground",(1030,553),{"lower"},0.3).state, "CLIMB")
-        self.assertEqual(nav.tick("ground",(1030,553),{"lower"},1).state, "LADDER_RETRY")
+        self.assertEqual(nav.tick("ground",(1030,553),{"lower"},1.199).state, "CLIMB")
+        self.assertEqual(nav.tick("ground",(1030,553),{"lower"},1.2).state, "LADDER_RETRY")
         self.assertIsNotNone(nav.tick("ground",(1030,553),{"lower"},2))
         self.assertNotEqual(nav.edge["x"], 962)
 
@@ -384,7 +407,7 @@ class PlatformSurveyTest(unittest.TestCase):
             drift = nav.tick(None, (375,510), {"upper_left"}, .3)
             self.assertEqual((drift.move_x, drift.action), ("none", "grab_ladder"))
             self.assertEqual(nav.tick(None, (375,510), {"upper_left"}, .51).state, "CLIMB")
-            self.assertEqual(nav.tick(None, (375,510), {"upper_left"}, 1).state, "LADDER_RETRY")
+            self.assertEqual(nav.tick(None, (375,510), {"upper_left"}, 1.2).state, "LADDER_RETRY")
 
     def test_airborne_offset_on_logged_962_ladder_does_not_cancel_up(self):
         nav = LadderNavigator(self.survey.data)
@@ -407,7 +430,7 @@ class PlatformSurveyTest(unittest.TestCase):
         with patch.object(d, "_detect_player_by_title", side_effect=locate), patch.object(
                 d.survey, "register", return_value=(-1710, 0)), patch.object(
                 d.survey, "scan", return_value=[]), patch("src.engine.MonsterDetector.time.monotonic",
-                                                         side_effect=[0, .16, .34, .50, .8, 1.4]):
+                                                         side_effect=[0, .16, .34, .50, .8, 1.55]):
             for expected in ["none none none", "none none none", "none up none", "none up none"]:
                 d.run_once()
                 self.assertEqual(d._kb.set_command.call_args.args, (expected,))
@@ -441,6 +464,13 @@ class PlatformSurveyTest(unittest.TestCase):
             jump = tick(48, 1.10, 1.21)
             self.assertEqual((jump.move_x, jump.action), (direction, "grab_ladder"))
             self.assertEqual(tick(46, 1.12, 1.23).state, "CLIMB")
+
+    def test_upper_right_uses_the_common_side_jump_and_climb_protection(self):
+        nav = LadderNavigator(self.survey.data)
+        grab = nav.tick("middle_east", (1684, 352), {"upper_right"}, 0)
+        self.assertEqual((grab.action, grab.move_x), ("grab_ladder", "left"))
+        self.assertEqual(nav.tick("middle_east", (1590, 352), set(), 1.084).state, "CLIMB")
+        self.assertEqual(nav.tick("middle_east", (1590, 352), set(), 1.2).state, "LADDER_RETRY")
 
     def test_estimated_crossing_stops_until_post_brake_observation(self):
         nav = LadderNavigator(self.survey.data)
