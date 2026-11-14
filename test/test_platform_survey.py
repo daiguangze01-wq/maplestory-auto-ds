@@ -390,6 +390,35 @@ class PlatformSurveyTest(unittest.TestCase):
         self.assertEqual(tick(429, 1.0).action, "grab_ladder")
         self.assertEqual(nav.tick(None, (375,510), {"upper_left"}, 1.2).state, "LADDER_RETRY")
 
+    def test_resume_on_ladder_with_no_active_route_or_monsters(self):
+        d = MonsterDetector(dict(self.detector.cfg, single_platform=False))
+        d.load_monster_images()
+        d._kb = Mock(input_status="Ready")
+        d.get_img_frame = Mock(return_value=self.frame)
+        y = 318
+        def locate():
+            d.loc_player = (634, y - 30)
+            d._title_last_seen_frame = d.frame_count
+        with patch.object(d, "_detect_player_by_title", side_effect=locate), patch.object(
+                d.survey, "register", return_value=(-1710, 0)), patch.object(
+                d.survey, "scan", return_value=[]), patch("src.engine.MonsterDetector.time.monotonic",
+                                                         side_effect=[0, .16, .34, .50, .8, 1.1]):
+            for expected in ["none none none", "none none none", "none up none", "none up none"]:
+                d.run_once()
+                self.assertEqual(d._kb.set_command.call_args.args, (expected,))
+            y = 210
+            d.run_once()
+            d.run_once()
+            self.assertIsNone(d.ladder_nav.edge)
+            self.assertEqual(d._kb.set_command.call_args.args, ("none none none",))
+
+    def test_passing_ladder_in_air_does_not_resume(self):
+        nav = LadderNavigator(self.survey.data)
+        for i, y in enumerate((350, 333, 318, 305, 318)):
+            self.assertEqual(nav.recover_hanging(None, (2344, y), i * .15).action, "none")
+            self.assertFalse(nav.grabbing)
+        self.assertIsNone(nav.recover_hanging(None, (2390, 318), .85))
+
     def test_occluded_medal_uses_current_frame_and_rejects_ambiguity(self):
         d = self.detector
         medal = d.img_title[:, :, :3]

@@ -16,6 +16,8 @@ class LadderNavigator:
         self.edge = None
         self.target_floor = None
         self.grabbing = False
+        self.resumed = False
+        self.hanging_sample = None
         self.aligned_x = None
         self.align_since = None
         self.last_step = False
@@ -32,6 +34,7 @@ class LadderNavigator:
         self.reset()
 
     def missing_position(self, now):
+        self.hanging_sample = None
         self.aligned_x = None
         # Brief title occlusion may interrupt the feet measurement mid-climb.
         if self.edge and now - self.last_position_seen > 0.45:
@@ -43,7 +46,36 @@ class LadderNavigator:
     def _traversal_command(self):
         if self.edge["kind"] == "drop":
             return Command(action="drop_through", state="DROP_THROUGH")
+        if self.resumed:
+            return Command(move_y="up", state="CLIMB")
         return Command(action="grab_ladder", state="CLIMB")
+
+    def recover_hanging(self, floor, position, now):
+        if floor is not None or self.grabbing:
+            self.hanging_sample = None
+            return None
+        x, y = position
+        candidates = [edge for edge in self.connections if edge["kind"] == "climb"
+                      and abs(x - edge["x"]) <= 8
+                      and self.platforms[edge["to"]][2] + 8 < y < self.platforms[edge["from"]][2] - 12
+                      and self.retry_after.get((edge["from"], edge["x"]), 0) <= now]
+        if len(candidates) != 1:
+            self.hanging_sample = None
+            return None
+        edge = candidates[0]
+        sample = self.hanging_sample
+        if (sample is None or sample[0] != edge or abs(x-sample[1]) > 3 or abs(y-sample[2]) > 4
+                or now - self.last_position_seen > 0.45):
+            self.hanging_sample = (edge, x, y, now)
+        self.last_position_seen = now
+        if now - self.hanging_sample[3] < 0.3:
+            return Command(state="WAIT_FOR_FOOTING")
+        self.reset()
+        self.edge, self.target_floor = edge, edge["to"]
+        self.grabbing = self.resumed = True
+        self.last_progress = self.last_position_seen = self.last_target_seen = now
+        self.best_distance = y - self.platforms[edge["to"]][2]
+        return self._traversal_command()
 
     def _start_route(self, floor, x, destinations, now):
         # Different entrances to the same platform have different walking costs.

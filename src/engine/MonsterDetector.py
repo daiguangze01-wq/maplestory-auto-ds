@@ -1802,6 +1802,7 @@ class MonsterDetector:
                 platforms = self.survey.data["platforms"]
                 destinations = set(by_floor) - {None}
                 other_floors = destinations - {floor} if floor else set()
+                ladder_command = self.ladder_nav.recover_hanging(floor, position, now)
                 same_floor = by_floor.get(floor, ()) if floor else ()
                 local_attack = [m for m in self.attack_targets if m in same_floor or m in by_floor.get(None, ())]
                 if self.ladder_nav.grabbing:
@@ -1822,7 +1823,7 @@ class MonsterDetector:
                     self.floor_pending_clear = None
                     self.attack_targets = []
                     approach = "none"
-                elif self.ladder_nav.edge:
+                elif self.ladder_nav.edge and ladder_command is None:
                     ladder_command = self.ladder_nav.tick(floor, position, destinations, now)
                 elif other_floors:
                     upper = {dest for dest in other_floors if platforms[dest][2] < platforms[floor][2]}
