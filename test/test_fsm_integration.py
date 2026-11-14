@@ -58,6 +58,7 @@ class _KBStub:
 def _load_cfg() -> dict:
     cfg = load_yaml("config/config_default.yaml")
     override_cfg(cfg, load_yaml("config/config_custom.yaml"))
+    cfg["bot"]["chase_visible"] = False  # Exercise the original stationary mode.
     return cfg
 
 

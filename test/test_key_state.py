@@ -140,6 +140,15 @@ class KeyStateTrackerTest(unittest.TestCase):
             ("down", "alt"), ("up", "alt"),
         ])
 
+    def test_ladder_grab_taps_once_then_holds_up_until_exit(self):
+        self.kb.cfg["key"]["jump"] = "c"
+        self.tick("right none none")
+        for _ in range(3):
+            self.tick("none none grab_ladder")
+        self.tick("none none attack")
+        self.assertEqual(self.events, [("down", "right"), ("up", "right"), ("down", "c"),
+                                      ("up", "c"), ("down", "up"), ("up", "up"), ("down", "x")])
+
     def test_double_actions_fire_once_on_entry(self):
         for action, key in (("double_jump", "alt"), ("double_teleport", "e")):
             with self.subTest(action=action):

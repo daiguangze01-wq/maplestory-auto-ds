@@ -43,7 +43,10 @@ def main():
                         help="Disable the debug visualization window")
     parser.add_argument("--observe", action="store_true",
                         help="Preview platform and ghost detection without keyboard control")
-    parser.add_argument("--single-platform", action="store_true",
+    hunt_modes = parser.add_mutually_exclusive_group()
+    hunt_modes.add_argument("--stationary", action="store_true",
+                            help="Use the original local stationary hunting mode")
+    hunt_modes.add_argument("--single-platform", action="store_true",
                         help="Hunt only on the first recognized platform this session")
     args = parser.parse_args()
 
@@ -84,6 +87,8 @@ def main():
         logger.info("  Debug visualization: disabled")
     cfg["observe"] = args.observe
     cfg["single_platform"] = args.single_platform
+    if args.stationary or args.single_platform:
+        cfg["bot"]["chase_visible"] = False
     if args.observe or args.single_platform:
         cfg["bot"]["enable_route"] = False
     if args.observe:

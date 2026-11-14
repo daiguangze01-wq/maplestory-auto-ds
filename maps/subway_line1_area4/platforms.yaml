@@ -12,14 +12,25 @@ anchors:
   - [595, 546, 645, 589]
   - [1116, 202, 1163, 245]
   - [358, 195, 417, 246]
+  - [1021, 530, 1066, 603]
+  - [1217, 440, 1265, 550]
+# Half-scale grayscale landmark strips from the east view, aligned using the
+# signal and girder visible in both captures. Origins are full-size map pixels.
+extra_landmarks:
+  image: east-landmarks.png
+  patch_height: 22
+  origins: [[1629,346], [2029,346], [1299,430], [1709,200], [2139,522], [1361,552]]
 # x start, x end, standing y. Split the upper walkway at its gap.
 platforms:
   upper_left: [360, 905, 210]
-  upper_right: [1120, 1279, 210]
-  middle: [695, 1279, 322]
+  upper_right: [1120, 1832, 210]
+  upper_east: [2045, 2288, 210]
+  middle: [695, 1329, 322]
+  middle_east: [1579, 2215, 351]
   ledge: [360, 487, 380]
   lower: [528, 1074, 435]
-  ground: [215, 1279, 553]
+  lower_east: [1288, 1752, 435]
+  ground: [215, 2288, 553]
 # Each connector is a one-way candidate until its landing is observed in game.
 connections:
   - {kind: climb, x: 430, from: ledge, to: upper_left, verified: false}
@@ -27,6 +38,11 @@ connections:
   - {kind: climb, x: 740, from: lower, to: middle, verified: false}
   - {kind: climb, x: 865, from: middle, to: upper_left, verified: false}
   - {kind: climb, x: 958, from: ground, to: lower, verified: false}
+  - {kind: climb, x: 1268, from: middle, to: upper_right, verified: false}
+  - {kind: climb, x: 1534, from: ground, to: lower_east, verified: false}
+  - {kind: climb, x: 1747, from: lower_east, to: middle_east, verified: false}
+  - {kind: climb, x: 2078, from: ground, to: middle_east, verified: false}
+  - {kind: climb, x: 1644, from: middle_east, to: upper_right, verified: false}
   - {kind: drop, x: 462, from: ledge, to: ground, verified: false}
   - {kind: drop, x: 803, from: middle, to: lower, verified: false}
   - {kind: drop, x: 640, from: lower, to: ground, verified: false}

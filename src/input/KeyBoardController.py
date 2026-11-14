@@ -431,6 +431,16 @@ class KeyBoardController():
                 if self.is_need_force_heal:
                     action = "add_hp"
                     self._last_action = None
+                if action == "grab_ladder":
+                    if self._last_action != action:
+                        if not self._apply_holds("none", "none", "none"):
+                            return False
+                        if not self.press_key_safe(self.cfg["key"]["jump"], 0.08, "ladder jump"):
+                            return False
+                        self._last_action = action
+                    if self._command[2] == action and self.is_game_window_active():
+                        return self._apply_holds("none", "up", "none")
+                    return False
                 if self._apply_holds(move_x, move_y, action):
                     self._apply_action(action)
                 elif self.input_status == "Ready":

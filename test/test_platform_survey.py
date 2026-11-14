@@ -5,6 +5,7 @@ import cv2
 import numpy as np
 
 from src.engine.MonsterDetector import MonsterDetector
+from src.engine.LadderNavigator import LadderNavigator
 from src.utils.common import load_yaml, override_cfg
 
 
@@ -103,6 +104,77 @@ class PlatformSurveyTest(unittest.TestCase):
                 self.assertEqual(detector._kb.set_command.call_args.args, ("none none none",))
             detector.run_once()
             self.assertEqual(detector._kb.set_command.call_args.args, ("face_right none attack",))
+
+    def test_visible_chase_walk_then_attack_then_stop(self):
+        cfg = self.detector.cfg.copy()
+        cfg["single_platform"] = False
+        detector = MonsterDetector(cfg)
+        self.assertTrue(detector.load_monster_images())
+        detector._kb = Mock()
+        detector.get_img_frame = Mock(return_value=self.frame)
+        foot_x = 450
+        def on_ground():
+            detector.loc_player = (foot_x, 523)
+            detector._title_last_seen_frame = detector.frame_count
+        with patch.object(detector, "_detect_player_by_title", side_effect=on_ground):
+            # Real reference image has two ground ghosts beyond the old ROI.
+            detector.run_once()
+            self.assertEqual(len(detector.visible_ghosts), 4)
+            self.assertEqual(detector._kb.set_command.call_args.args, ("right none none",))
+            foot_x = 735
+            detector.run_once()
+            self.assertEqual(detector._kb.set_command.call_args.args, ("face_right none attack",))
+            with patch.object(detector.survey, "scan", return_value=[]):
+                detector.run_once()
+                self.assertEqual(detector._kb.set_command.call_args.args, ("none none none",))
+
+    def test_approach_only_when_a_firing_position_exists_on_current_platform(self):
+        ghost = dict(position=(80, 475), size=(50, 40))
+        approach = self.survey.approach_direction
+        self.assertEqual(approach((800,553), (0,0), [ghost], (800,523), 250,150), "left")
+        self.assertEqual(approach((430,380), (0,0), [ghost], (430,350), 250,150), "none")
+        self.assertEqual(approach((800,553), None, [ghost], (800,523), 250,150), "none")
+
+    def test_climb_from_ground_to_upper_platform_in_two_legs(self):
+        nav = LadderNavigator(self.survey.data)
+        goal = {"middle_east"}
+        self.assertEqual(nav.tick("ground", (1480,553), goal, 0).move_x, "right")
+        self.assertEqual(nav.edge["x"], 1534)
+        self.assertEqual(nav.tick("ground", (1533,553), goal, 1).action, "grab_ladder")
+        self.assertEqual(nav.tick(None, (1534,480), set(), 1.6).state, "CLIMB")
+        nav.tick("lower_east", (1534,435), goal, 2)
+        self.assertIsNone(nav.tick("lower_east", (1534,435), goal, 2.3))
+        self.assertEqual(nav.tick("lower_east", (1534,435), goal, 2.5).move_x, "right")
+        self.assertEqual(nav.edge["to"], "middle_east")
+
+    def test_only_upper_ghosts_drive_real_hunt_entry_to_ladder(self):
+        cfg = dict(self.detector.cfg, single_platform=False)
+        detector = MonsterDetector(cfg)
+        detector.load_monster_images()
+        detector._kb = Mock(input_status="Ready")
+        detector.get_img_frame = Mock(return_value=self.frame)
+        x = 700
+        def on_ground():
+            detector.loc_player = (x, 523)
+            detector._title_last_seen_frame = detector.frame_count
+        ghost = dict(position=(750, 250), size=(50, 50))
+        with patch.object(detector, "_detect_player_by_title", side_effect=on_ground), patch.object(
+                detector.survey, "scan", return_value=[ghost]):
+            detector.run_once()
+            self.assertEqual(detector.fsm.state, "WALK_TO_LADDER")
+            x = detector.ladder_nav.edge["x"]
+            detector.run_once()
+            self.assertEqual(detector._kb.set_command.call_args.args, ("none none grab_ladder",))
+            detector.cfg["bot"]["mode"] = "detect"
+            detector.run_once()
+            self.assertEqual(detector._kb.set_command.call_args.args, ("none none none",))
+
+    def test_failed_grab_releases_and_tries_another_route(self):
+        nav = LadderNavigator(self.survey.data)
+        nav.tick("ground", (1534,553), {"middle_east"}, 0)
+        self.assertEqual(nav.tick("ground", (1534,553), {"middle_east"}, 2).state, "LADDER_RETRY")
+        self.assertEqual(nav.tick("ground", (1534,553), {"middle_east"}, 2.2).move_x, "right")
+        self.assertEqual(nav.edge["x"], 2078)
 
 
 if __name__ == "__main__":

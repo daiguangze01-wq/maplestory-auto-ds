@@ -48,6 +48,9 @@ class Perception:
     progress_x: Optional[float] = None    # 稳定的水平位移基准（小地图/全局坐标）
     progress_src: str = "none"            # global / minimap / none
     single_platform: bool = False         # Assigned platform, stationary team hunting
+    chase_visible: bool = False
+    approach_direction: str = "none"
+    ladder_command: Optional[Command] = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +136,9 @@ class CharacterFSM:
 
     def tick(self, p: Perception) -> Command:
         """推进一帧，返回本帧命令。"""
+        if p.mode == "hunt" and p.chase_visible and not p.single_platform and p.ladder_command:
+            self._advance_state(p.ladder_command.state)
+            return p.ladder_command
         move_x, move_y, action = "none", "none", "none"
         route_move_x, route_move_y = "none", "none"
 
@@ -143,7 +149,7 @@ class CharacterFSM:
             action = route_action
 
         # ② 按优先级覆盖
-        if p.single_platform:
+        if p.single_platform or p.chase_visible:
             # Turning to attack is allowed. Suppress periodic walks, route
             # commands and searching so a ledge near its edge stays occupied.
             active = p.mode == "hunt" and p.monster_count > 0
@@ -154,6 +160,10 @@ class CharacterFSM:
                 threshold = self.cfg.get("directional_attack", {}).get("aoe_monster_count", 3)
                 action = "aoe" if p.monster_count >= threshold else "attack"
             new_state = STATE_COMBAT_IN_PLACE if active else STATE_IDLE
+            if (p.chase_visible and not p.single_platform and p.mode == "hunt"
+                    and not active and p.approach_direction in ("left", "right")):
+                move_x = p.approach_direction
+                new_state = STATE_COMBAT_PURSUE
         elif p.mode == "hunt" and p.attack_in_place:
             self._reset_hunt_search_state()
             move_x, move_y, action = self._in_place_command(p)

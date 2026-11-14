@@ -31,6 +31,7 @@ from src.input.GameWindowCapturor import GameWindowCapturor
 from src.engine.CharacterFSM import CharacterFSM, Perception
 from src.engine.HealthMonitor import HealthMonitor
 from src.engine.PlatformSurvey import PlatformSurvey
+from src.engine.LadderNavigator import LadderNavigator
 
 
 class MonsterDetector:
@@ -60,6 +61,11 @@ class MonsterDetector:
         self.monsters: list = []        # Detected monsters in current frame
         self.attack_targets = []
         self.survey = None
+        self.ladder_nav = None
+        self._upper_targets_since = None
+        self.chase_visible = (cfg["bot"].get("chase_visible", False)
+                              and not cfg.get("single_platform") and not cfg["bot"].get("enable_route")
+                              and tuple(cfg["monster_detect"].get("monsters", ())) == ("ghost",))
         self.visible_ghosts = []
         self.platform_offset = None
         self.player_feet = None
@@ -227,13 +233,15 @@ class MonsterDetector:
             return False
 
         logger.info(f"Total monsters loaded: {list(self.monsters_info.keys())}")
-        if self.cfg.get("observe") or self.cfg.get("single_platform"):
+        if self.chase_visible or self.cfg.get("observe") or self.cfg.get("single_platform"):
             profile = self.cfg.get("platform_profile")
             if not profile or not self.monsters_info.get("ghost"):
                 logger.error("Platform modes require platform_profile and ghost templates.")
                 return False
             self.survey = PlatformSurvey(profile, self.monsters_info["ghost"],
                                          self.cfg["monster_detect"]["diff_thres"])
+            if self.chase_visible:
+                self.ladder_nav = LadderNavigator(self.survey.data)
         return True
 
     def _load_monster_template(self, file: str) -> tuple:
@@ -1523,6 +1531,9 @@ class MonsterDetector:
         # Capture frame
         self.img_frame = self.get_img_frame()
         if self.img_frame is None:
+            self._upper_targets_since = None
+            if self.ladder_nav:
+                self.ladder_nav.reset()
             self.visible_ghosts = []
             self.player_feet = self.platform_offset = self.loc_player_minimap = None
             if self._kb:
@@ -1680,6 +1691,39 @@ class MonsterDetector:
             self.attack_targets = [m for m in self.attack_targets if floor and floor == self.locked_platform
                                    and self.survey.monster_platform(m, self.platform_offset) == floor]
         progress_x, progress_src = self._get_hunt_search_progress_x()
+        approach = "none"
+        if self.chase_visible and self.survey and not self.attack_targets:
+            approach = self.survey.approach_direction(self.player_feet, self.platform_offset,
+                                                      self.visible_ghosts, self.loc_player, reach_x, reach_y)
+        ladder_command = None
+        if self.ladder_nav:
+            can_navigate = (self.cfg["bot"]["mode"] == "hunt" and self.player_feet is not None
+                            and self.platform_offset is not None
+                            and (not self._kb or self._kb.input_status == "Ready"))
+            if can_navigate:
+                floor = self.survey.platform_at(self.player_feet, self.platform_offset)
+                position = tuple(a-b for a, b in zip(self.player_feet, self.platform_offset))
+                destinations = {self.survey.monster_platform(m, self.platform_offset) for m in self.visible_ghosts}
+                platforms = self.survey.data["platforms"]
+                now = time.monotonic()
+                only_above = floor and destinations and all(
+                    dest and platforms[dest][2] < platforms[floor][2] for dest in destinations)
+                if only_above and self.attack_targets:
+                    if self._upper_targets_since is None:
+                        self._upper_targets_since = now
+                elif floor or not destinations:
+                    self._upper_targets_since = None
+                climb = (self.ladder_nav.grabbing or (only_above and not self.attack_targets)
+                         or (only_above and self.ladder_nav.edge is not None)
+                         or (only_above and self._upper_targets_since is not None and now - self._upper_targets_since >= 2)
+                         or (not self.attack_targets and approach == "none"))
+                if climb:
+                    ladder_command = self.ladder_nav.tick(floor, position, destinations, now)
+                else:
+                    self.ladder_nav.reset()
+            else:
+                self._upper_targets_since = None
+                self.ladder_nav.reset()
         perception = Perception(
             mode=self.cfg["bot"].get("mode", "detect"),
             attack_style=self.cfg["bot"]["attack"],
@@ -1693,13 +1737,17 @@ class MonsterDetector:
             progress_x=progress_x,
             progress_src=progress_src,
             single_platform=single_platform,
+            chase_visible=self.chase_visible,
+            approach_direction=approach,
+            ladder_command=ladder_command,
         )
         command = self.fsm.tick(perception)
         if self._kb:
             self._kb.set_command(f"{command.move_x} {command.move_y} {command.action}")
             if perception.mode == "hunt" and self.frame_count % 30 == 0:
                 logger.info(
-                    f"[Hunt] monsters={len(self.monsters)} in_range={perception.monster_count} state={command.state} "
+                    f"[Hunt] monsters={len(self.monsters)} visible={len(self.visible_ghosts) if self.survey else '-'} "
+                    f"in_range={perception.monster_count} state={command.state} "
                     f"dispatch=({command.move_x},{command.move_y},{command.action}) "
                     f"on_ladder={self.is_on_ladder} input={self._kb.input_status} "
                     f"held={self._kb.pressed_keys()}"
@@ -1773,11 +1821,12 @@ class MonsterDetector:
                 )
 
             if self.survey:
-                status = (f"Locked {self.locked_platform or '?'}" if single_platform else "Observe")
+                status = (f"Locked {self.locked_platform or '?'}" if single_platform else
+                          f"{command.state} {command.move_x}" if perception.mode == "hunt" else "Observe")
                 if self.platform_offset is None:
                     status += " / unmapped"
                 self.survey.draw(self.img_frame_debug, self.platform_offset, self.player_feet,
-                                 self.visible_ghosts, len(self.attack_targets), status, not single_platform)
+                                 self.visible_ghosts, len(self.attack_targets), status, self.cfg.get("observe", False))
 
         # Pre-scale display frame in background thread
             scale = self.cfg["monster_detect"].get("display_scale", 0.55)

@@ -26,6 +26,14 @@ class PlatformSurvey:
         for x, y, right, bottom in self.data["anchors"]:
             x, y = x // 2, y // 2
             self.anchors.append((x, y, small[y:bottom // 2, x:right // 2].copy()))
+        extra = self.data.get("extra_landmarks")
+        if extra:
+            atlas = cv2.imread(str(profile.parent / extra["image"]), cv2.IMREAD_GRAYSCALE)
+            height = extra["patch_height"]
+            if atlas is None or atlas.shape[0] != len(extra["origins"]) * height:
+                raise ValueError(f"Invalid landmark image for {profile}")
+            for i, (x, y) in enumerate(extra["origins"]):
+                self.anchors.append((x / 2, y / 2, atlas[i*height:(i+1)*height]))
         self.templates = []
         for template, mask in ghosts:
             # Use opaque interior pixels for the coarse search. Transparent
@@ -103,6 +111,30 @@ class PlatformSurvey:
                     seen.add(edge["to"])
                     queue.append((edge["to"], first or edge))
         return None, None
+
+    def approach_direction(self, feet, offset, ghosts, center, reach_x, reach_y):
+        """Find the nearest firing position reachable by walking on this platform."""
+        floor = self.platform_at(feet, offset)
+        if floor is None:
+            return "none"
+        left, right, _ = self.data["platforms"][floor]
+        # Keep the firing position inside the ledge even for another level.
+        left += offset[0] + 24
+        right += offset[0] - 24
+        px, py = center
+        steps = []
+        for m in ghosts:
+            x, y = m["position"]
+            h, w = m["size"]
+            mx, my = x + w // 2, y + h // 2
+            if abs(my - py) > reach_y or abs(mx - px) <= reach_x:
+                continue
+            lo, hi = max(left, mx - reach_x), min(right, mx + reach_x)
+            if lo <= hi:
+                steps.append(min(max(px, lo), hi) - px)
+        if not steps:
+            return "none"
+        return "right" if min(steps, key=abs) > 0 else "left"
 
     def scan(self, frame, gray):
         """Find ghosts in the playfield, coarse grayscale then full-size masked BGR."""
