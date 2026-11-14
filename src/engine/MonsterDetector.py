@@ -159,6 +159,7 @@ class MonsterDetector:
 
         # Capture thread
         self.capture = None
+        self.frame_time = None
 
     # -------------------------------------------------------------------
     # Monster image loading
@@ -299,7 +300,7 @@ class MonsterDetector:
         if self.capture is None:
             self.start_capture()
 
-        frame = self.capture.get_frame()
+        frame, self.frame_time = self.capture.get_timed_frame()
         if frame is None:
             return None
 
@@ -1788,7 +1789,7 @@ class MonsterDetector:
             if self.cfg["bot"]["mode"] != "hunt" or (self._kb and self._kb.input_status != "Ready"):
                 self.ladder_nav.reset()
             elif self.player_feet is None or self.platform_offset is None:
-                if self.platform_offset is None:
+                if self.platform_offset is None and not self.ladder_nav.climb_protected(now):
                     # Losing the camera reference is not evidence of a failed ladder.
                     self.ladder_nav.reset()
                 else:
@@ -1802,11 +1803,13 @@ class MonsterDetector:
                 platforms = self.survey.data["platforms"]
                 destinations = set(by_floor) - {None}
                 other_floors = destinations - {floor} if floor else set()
+                coarse_position = self.position_source == "minimap"
                 ladder_command = self.ladder_nav.recover_hanging(floor, position, now)
                 same_floor = by_floor.get(floor, ()) if floor else ()
                 local_attack = [m for m in self.attack_targets if m in same_floor or m in by_floor.get(None, ())]
                 if self.ladder_nav.grabbing:
-                    ladder_command = self.ladder_nav.tick(floor, position, destinations, now)
+                    ladder_command = self.ladder_nav.tick(floor, position, destinations, now,
+                                                          coarse_position=coarse_position, frame_time=self.frame_time)
                     if ladder_command is None:
                         # On landing, release the traversal keys before planning the next leg.
                         # An upper target in the skill box must not trigger a jump in between.
@@ -1824,10 +1827,12 @@ class MonsterDetector:
                     self.attack_targets = []
                     approach = "none"
                 elif self.ladder_nav.edge and ladder_command is None:
-                    ladder_command = self.ladder_nav.tick(floor, position, destinations, now)
+                    ladder_command = self.ladder_nav.tick(floor, position, destinations, now,
+                                                          coarse_position=coarse_position, frame_time=self.frame_time)
                 elif other_floors:
                     upper = {dest for dest in other_floors if platforms[dest][2] < platforms[floor][2]}
-                    ladder_command = self.ladder_nav.tick(floor, position, upper or other_floors, now)
+                    ladder_command = self.ladder_nav.tick(floor, position, upper or other_floors, now,
+                                                          coarse_position=coarse_position, frame_time=self.frame_time)
         perception = Perception(
             mode=self.cfg["bot"].get("mode", "detect"),
             attack_style=self.cfg["bot"]["attack"],
@@ -1848,9 +1853,12 @@ class MonsterDetector:
         previous_state = self.fsm.state
         command = self.fsm.tick(perception)
         if self._kb:
-            self._kb.set_command(f"{command.move_x} {command.move_y} {command.action}")
+            if self.ladder_nav and perception.mode != "hunt":
+                self._kb.set_command("stop stop stop")
+            else:
+                self._kb.set_command(f"{command.move_x} {command.move_y} {command.action}")
             if self.ladder_nav and command.state != previous_state and (
-                    ladder_command or previous_state in ("WALK_TO_LADDER", "ALIGN_LADDER", "CLIMB", "WALK_TO_DROP",
+                    ladder_command or previous_state in ("WALK_TO_LADDER", "CLIMB", "WALK_TO_DROP",
                                                           "DROP_THROUGH", "LADDER_RETRY", "WAIT_FOR_FOOTING")):
                 logger.info(f"[Ladder] {previous_state} -> {command.state} floor={floor} "
                             f"feet={self.player_feet} offset={self.platform_offset} "

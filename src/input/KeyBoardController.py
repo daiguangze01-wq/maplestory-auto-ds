@@ -154,6 +154,8 @@ class KeyBoardController():
         self._command = ("none", "none", "none")
         self._last_face = None
         self._last_action = None
+        self._climb_until = 0.0
+        self._ladder_side_until = 0.0
         self.jump_attack = cfg["bot"].get("jump_attack", False)
         self.jump_attack_interval = float(cfg["bot"].get("jump_attack_interval", 0.65))
         self._next_jump_attack = 0.0
@@ -278,6 +280,7 @@ class KeyBoardController():
     def release_all_key(self):
         """Leave the current action and release exactly the keys we own."""
         with _INPUT_LOCK:
+            self._climb_until = 0.0
             for key in get_pressed_keys():
                 key_up(key)
             self._last_face = None
@@ -293,6 +296,8 @@ class KeyBoardController():
         """
         with _INPUT_LOCK:
             if self.is_terminated or not self.is_enable or self.game_has_higher_integrity:
+                return False
+            if self._climb_until and time.monotonic() < self._climb_until:
                 return False
             if not self.is_game_window_active():
                 logger.warning(
@@ -414,6 +419,15 @@ class KeyBoardController():
                 return False
             self.input_status = "Ready"
 
+            if self._command == ("stop", "stop", "stop"):
+                self.release_all_key()
+                return True
+            if self._climb_until:
+                now = time.monotonic()
+                if now < self._climb_until:
+                    return self._hold_ladder(now)
+                self._climb_until = 0.0
+
             for i, buff_key in enumerate(self.buff_keys):
                 cooldown = self.buff_cooldowns[i] if i < len(self.buff_cooldowns) else 60
                 now = time.time()
@@ -444,13 +458,24 @@ class KeyBoardController():
                     return self._last_action == action
                 if action == "grab_ladder":
                     if self._last_action != action:
-                        if not self._apply_holds("none", "none", "none"):
+                        horizontal = move_x if move_x in ("left", "right") else "none"
+                        self._ladder_side_until = time.monotonic() + 0.20
+                        if (self._command[2] != action or not self.is_game_window_active()
+                                or not self._apply_holds(horizontal, "up", "none")):
+                            self.release_all_key()
                             return False
-                        if not self.press_key_safe(self.cfg["key"]["jump"], 0.08, "ladder jump"):
+                        time.sleep(0.007)
+                        takeoff = time.monotonic()
+                        if (self._command[2] == "stop" or not self.press_key_safe(
+                                self.cfg["key"]["jump"], 0.03, "ladder jump")):
+                            self.release_all_key()
                             return False
                         self._last_action = action
-                    if self._command[2] == action and self.is_game_window_active():
-                        return self._apply_holds("none", "up", "none")
+                        self._climb_until = takeoff + 1.0
+                        logger.info(f"[LadderInput] Jump sent with Up held; horizontal={horizontal}")
+                    if self._command[2] != "stop" and self.is_game_window_active():
+                        return self._hold_ladder(time.monotonic())
+                    self.release_all_key()
                     return False
                 if self._apply_holds(move_x, move_y, action):
                     self._apply_action(action)
@@ -460,6 +485,12 @@ class KeyBoardController():
 
         self._pickup()
         return True
+
+    def _hold_ladder(self, now):
+        horizontal, _, action = self._command
+        if action != "grab_ladder" or horizontal not in ("left", "right") or now >= self._ladder_side_until:
+            horizontal = "none"
+        return self._apply_holds(horizontal, "up", "none")
 
     def run(self):
         """Main control loop (daemon thread)."""

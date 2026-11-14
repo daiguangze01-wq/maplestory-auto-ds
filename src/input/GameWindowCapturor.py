@@ -13,6 +13,7 @@ from src.utils.logger import logger
 class GameWindowCapturor:
     def __init__(self, cfg, test_image_path=""):
         self.frame = None
+        self.frame_time = None
         self.hwnd = None
         self.window_title = ""
         self._control = None
@@ -45,6 +46,7 @@ class GameWindowCapturor:
     def _clear_frame(self):
         with self._lock:
             self.frame = None
+            self.frame_time = None
 
     def _client_pixels(self, pixels):
         """Match this WGC surface to its physical DWM or window bounds before cropping."""
@@ -97,6 +99,7 @@ class GameWindowCapturor:
                 self._last_size = size
             with self._lock:
                 self.frame = bgr
+                self.frame_time = now
         except self._win.error:
             self._clear_frame()
         finally:
@@ -104,10 +107,13 @@ class GameWindowCapturor:
                 user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(previous))
 
     def get_frame(self):
+        return self.get_timed_frame()[0]
+
+    def get_timed_frame(self):
         if self.hwnd and (not self._win.IsWindow(self.hwnd) or self._win.IsIconic(self.hwnd)):
             self._clear_frame()
         with self._lock:
-            return self.frame
+            return self.frame, self.frame_time
 
     def stop(self):
         if self._control is not None and not self._control.is_finished():

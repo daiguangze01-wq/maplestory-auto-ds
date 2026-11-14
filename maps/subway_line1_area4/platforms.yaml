@@ -72,15 +72,15 @@ connections:
   - {kind: climb, x: 430, from: ground, to: ledge, verified: false}
   - {kind: climb, x: 740, from: lower, to: middle, verified: false}
   - {kind: climb, x: 865, from: middle, to: upper_left, verified: false}
-  - {kind: climb, x: 958, from: ground, to: lower, verified: false}
-  - {kind: climb, x: 1268, from: middle, to: upper_right, verified: false}
-  - {kind: climb, x: 1534, from: ground, to: lower_east, verified: false}
-  - {kind: climb, x: 1747, from: lower_east, to: middle_east, verified: false}
+  - {kind: climb, x: 962, from: ground, to: lower, verified: false}
+  - {kind: climb, x: 1272, from: middle, to: upper_right, verified: false}
+  - {kind: climb, x: 1537, from: ground, to: lower_east, verified: false}
+  - {kind: climb, x: 1749, from: lower_east, to: middle_east, verified: false}
   - {kind: climb, x: 2078, from: ground, to: middle_east, verified: false}
   - {kind: climb, x: 1644, from: middle_east, to: upper_right, verified: false}
-  - {kind: climb, x: 2629, from: ground, to: lower_far_east, verified: false}
-  - {kind: climb, x: 2340, from: lower_far_east, to: upper_east, verified: false}
-  - {kind: climb, x: 2600, from: lower_far_east, to: upper_east, verified: false}
+  - {kind: climb, x: 2631, from: ground, to: lower_far_east, verified: false}
+  - {kind: climb, x: 2343, from: lower_far_east, to: upper_east, verified: false}
+  - {kind: climb, x: 2602, from: lower_far_east, to: upper_east, verified: false}
   - {kind: climb, x: 3036, from: middle_far_east, to: upper_far_east, verified: false}
   - {kind: drop, x: 462, from: ledge, to: ground, verified: false}
   - {kind: drop, x: 803, from: middle, to: lower, verified: false}

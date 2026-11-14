@@ -16,11 +16,13 @@ class LadderNavigator:
         self.edge = None
         self.target_floor = None
         self.grabbing = False
+        self.grab_started = None
         self.resumed = False
         self.hanging_sample = None
-        self.aligned_x = None
-        self.align_since = None
-        self.last_step = False
+        self.grab_direction = "none"
+        self.drift_since = None
+        self.approach_sample = None
+        self.braked_at = None
         self.best_distance = float("inf")
         self.landing_since = None
         self.landing_floor = None
@@ -34,21 +36,26 @@ class LadderNavigator:
         self.reset()
 
     def missing_position(self, now):
+        self.approach_sample = None
         self.hanging_sample = None
-        self.aligned_x = None
+        self.grab_direction = "none"
         # Brief title occlusion may interrupt the feet measurement mid-climb.
-        if self.edge and now - self.last_position_seen > 0.45:
+        if self.edge and now - self.last_position_seen > 0.45 and not self.climb_protected(now):
             self.avoid_current(now)
         if self.edge:
             return self._traversal_command() if self.grabbing else Command(state="WAIT_FOR_FOOTING")
         return None
+
+    def climb_protected(self, now):
+        return (self.grabbing and self.edge["kind"] == "climb"
+                and now - self.grab_started < 1.0)
 
     def _traversal_command(self):
         if self.edge["kind"] == "drop":
             return Command(action="drop_through", state="DROP_THROUGH")
         if self.resumed:
             return Command(move_y="up", state="CLIMB")
-        return Command(action="grab_ladder", state="CLIMB")
+        return Command(move_x=self.grab_direction, action="grab_ladder", state="CLIMB")
 
     def recover_hanging(self, floor, position, now):
         if floor is not None or self.grabbing:
@@ -73,6 +80,7 @@ class LadderNavigator:
         self.reset()
         self.edge, self.target_floor = edge, edge["to"]
         self.grabbing = self.resumed = True
+        self.grab_started = now
         self.last_progress = self.last_position_seen = self.last_target_seen = now
         self.best_distance = y - self.platforms[edge["to"]][2]
         return self._traversal_command()
@@ -100,7 +108,7 @@ class LadderNavigator:
                 heappush(queue, (cost + abs(pos-edge["x"]) + height, next(order),
                                  edge["to"], edge["x"], first or edge))
 
-    def tick(self, floor, position, destinations, now):
+    def tick(self, floor, position, destinations, now, *, coarse_position=False, frame_time=None):
         if position is None:
             return self.missing_position(now)
         x, y = position
@@ -122,14 +130,53 @@ class LadderNavigator:
         dx = edge["x"] - x
         top = self.platforms[edge["to"]][2]
         dropping = edge["kind"] == "drop"
-        if floor != edge["from"] or abs(dx) > 8:
-            self.aligned_x = None
+        # The minimap dot is quantized to about 16 map pixels per pixel.
+        grab_radius = 8 if coarse_position else 4
+        launch_dx = dx
+        if not dropping and not self.grabbing and floor == edge["from"] and frame_time is not None:
+            # A decision may arrive a camera frame plus a keyboard tick after the observation.
+            previous = self.approach_sample
+            self.approach_sample = (frame_time, x, coarse_position)
+            if (now - frame_time > 0.28 or (self.braked_at is not None and frame_time <= self.braked_at)):
+                self.approach_sample = None
+                return Command(state="WAIT_FOR_FOOTING")
+            self.braked_at = None
+            if previous and previous[2] == coarse_position:
+                dt = frame_time - previous[0]
+                if 0.035 <= dt <= 0.35:
+                    speed = (x - previous[1]) / dt
+                    crossed = (edge["x"] - previous[1]) * dx < 0
+                    if speed * dx > 0 and abs(speed) <= 500:
+                        lead = min(32, abs(speed) * (max(0, now - frame_time) + 1/30))
+                        launch_dx = dx - (lead if dx > 0 else -lead)
+                    if crossed or launch_dx * dx < 0:
+                        # We may already have crossed. Release movement and remeasure.
+                        self.braked_at = now
+                        self.approach_sample = None
+                        return Command(state="WAIT_FOR_FOOTING")
+        else:
+            self.approach_sample = None
         if self.grabbing:
-            # A missed grab can carry the character sideways during the jump.
-            # Release Up as soon as measured feet leave the ladder corridor.
-            if abs(dx) > 36 and (not dropping or floor == edge["from"]):
-                self.avoid_current(now)
-                return Command(state="LADDER_RETRY")
+            if (self.grab_direction == "right" and dx <= grab_radius
+                    or self.grab_direction == "left" and dx >= -grab_radius
+                    or self.grab_direction != "none" and now - self.grab_started >= 0.20):
+                self.grab_direction = "none"
+            # An early launch can start up to 32 pixels outside the usual entry zone.
+            if abs(dx) > 36 and (not dropping or floor == edge["from"]) and not (
+                    self.grab_direction != "none" and abs(dx) <= self.launch_distance + 3):
+                # A single airborne reading just beyond the rails can precede
+                # the grab. Stop steering but keep Up through the next readings.
+                self.grab_direction = "none"
+                if floor is not None or abs(dx) > 60 or (
+                        self.drift_since is not None and now - self.drift_since >= 0.20):
+                    if self.climb_protected(now):
+                        return self._traversal_command()
+                    self.avoid_current(now)
+                    return Command(state="LADDER_RETRY")
+                if self.drift_since is None:
+                    self.drift_since = now
+            else:
+                self.drift_since = None
             # A continuous rope can carry us past an intermediate platform.
             # Require stable feet so crossing a platform in flight isn't a landing.
             reached = floor == edge["to"] if dropping else floor and self.platforms[floor][2] <= top
@@ -138,7 +185,7 @@ class LadderNavigator:
                     self.landing_floor = floor
                     self.landing_y = y
                     self.landing_since = now
-                elif now - self.landing_since >= 0.25:
+                elif now - self.landing_since >= 0.25 and not self.climb_protected(now):
                     self.reset()
                     return None
             else:
@@ -152,12 +199,11 @@ class LadderNavigator:
         elif floor != edge["from"]:
             self.reset()
             return None
-        elif abs(dx) <= (12 if dropping else 8):
-            if not dropping:
-                if self.aligned_x is None or abs(x - self.aligned_x) > 2:
-                    self.aligned_x, self.align_since = x, now
-                if now - self.align_since < 0.12:
-                    return Command(state="ALIGN_LADDER")
+        elif abs(launch_dx) <= (12 if dropping else 44):
+            if not dropping and abs(launch_dx) > grab_radius:
+                self.grab_direction = "right" if dx > 0 else "left"
+            self.launch_distance = abs(dx)
+            self.grab_started = now
             self.grabbing = True
             self.best_distance = float("inf")
             self.last_progress = now
@@ -167,12 +213,6 @@ class LadderNavigator:
             distance = abs(dx)
             state = "WALK_TO_DROP" if dropping else "WALK_TO_LADDER"
             direction = "right" if dx > 0 else "left"
-            if not dropping and distance <= 40:
-                # Take a short step, then release and measure again before the next one.
-                self.last_step = not self.last_step
-                direction = f"face_{direction}" if self.last_step else "none"
-            else:
-                self.last_step = False
             command = Command(direction, "none", "none", state)
         if distance < self.best_distance - 3:
             self.best_distance, self.last_progress = distance, now

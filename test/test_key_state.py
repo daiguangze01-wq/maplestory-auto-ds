@@ -145,15 +145,61 @@ class KeyStateTrackerTest(unittest.TestCase):
         self.tick("right none none")
         for _ in range(3):
             self.tick("none none grab_ladder")
-        self.tick("none none attack")
-        self.assertEqual(self.events, [("down", "right"), ("up", "right"), ("down", "c"),
-                                      ("up", "c"), ("down", "up"), ("up", "up"), ("down", "x")])
+        with patch.object(kbc.time, "monotonic", return_value=self.kb._climb_until):
+            self.tick("none none attack")
+        self.assertEqual(self.events, [("down", "right"), ("up", "right"), ("down", "up"),
+                                      ("down", "c"), ("up", "c"), ("up", "up"), ("down", "x")])
 
-    def test_grab_never_taps_a_horizontal_key(self):
+    def test_side_grab_overlaps_direction_jump_and_up_then_releases_direction(self):
         self.kb.cfg["key"]["jump"] = "c"
-        for _ in range(3):
-            self.tick("face_left none grab_ladder")
-        self.assertEqual(self.events, [("down", "c"), ("up", "c"), ("down", "up")])
+        with patch.object(kbc.time, "monotonic", side_effect=[1, 1.007, 1.08, 1.25]):
+            self.tick("left none grab_ladder")
+            self.tick("left none grab_ladder")
+        self.tick("stop stop stop")
+        self.assertEqual(self.events, [("down", "left"), ("down", "up"), ("down", "c"),
+                                       ("up", "c"), ("up", "left"), ("up", "up")])
+
+    def test_attack_and_other_commands_cannot_interrupt_first_second(self):
+        self.kb.cfg["key"]["jump"] = "c"
+        with patch.object(kbc.time, "monotonic", return_value=1), patch.object(
+                kbc.time, "sleep", side_effect=lambda _: self.kb.set_command("none none attack")):
+            self.tick("right none grab_ladder")
+        with patch.object(kbc.time, "monotonic", return_value=1.999):
+            for command in ("left none none", "none none attack", "none none drop_through", "none none none"):
+                self.tick(command)
+                self.assertEqual(self.kb.pressed_keys(), ["up"])
+            self.assertFalse(self.kb.press_key_safe("z"))
+        with patch.object(kbc.time, "monotonic", return_value=2):
+            self.tick("left none none")
+        self.assertEqual(self.kb.pressed_keys(), ["left"])
+        self.assertEqual(self.events.count(("down", "c")), 1)
+
+    def test_ladder_holds_up_before_jump(self):
+        self.kb.cfg["key"]["jump"] = "c"
+        holds = []
+        with patch.object(kbc.time, "sleep", side_effect=lambda duration: holds.append(
+                (duration, self.kb.pressed_keys()))):
+            self.tick("none none grab_ladder")
+            self.tick("none none grab_ladder")
+        self.assertEqual(holds, [(0.007, ["up"]), (0.03, ["c", "up"])])
+        self.assertEqual(self.kb.pressed_keys(), ["up"])
+
+    def test_focus_loss_overrides_active_ladder_protection(self):
+        self.tick("none none grab_ladder")
+        self.assertEqual(self.kb.pressed_keys(), ["up"])
+        self.kb.is_game_window_active = lambda: False
+        self.tick("none none grab_ladder")
+        self.assertEqual(self.kb.pressed_keys(), [])
+        self.kb.is_game_window_active = lambda: True
+        self.tick("left none none")
+        self.assertEqual(self.kb.pressed_keys(), ["left"])
+
+    def test_focus_lost_during_ladder_lead_releases_up_without_jumping(self):
+        self.kb.cfg["key"]["jump"] = "c"
+        with patch.object(kbc.time, "sleep", side_effect=lambda _: setattr(
+                self.kb, "is_game_window_active", lambda: False)):
+            self.tick("none none grab_ladder")
+        self.assertEqual(self.events, [("down", "up"), ("up", "up")])
 
     def test_drop_releases_walk_and_taps_jump_once_with_down_held(self):
         self.kb.cfg["key"]["jump"] = "c"
