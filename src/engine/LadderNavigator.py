@@ -1,4 +1,4 @@
-"""Select upward ladder routes and check progress in map coordinates."""
+"""Route to higher platforms through mapped ladder and drop connections."""
 from heapq import heappop, heappush
 from itertools import count
 
@@ -8,7 +8,7 @@ from src.engine.CharacterFSM import Command
 class LadderNavigator:
     def __init__(self, profile):
         self.platforms = profile["platforms"]
-        self.ladders = [edge for edge in profile["connections"] if edge["kind"] == "climb"]
+        self.connections = [edge for edge in profile["connections"] if edge["kind"] in ("climb", "drop")]
         self.retry_after = {}
         self.reset()
 
@@ -16,8 +16,34 @@ class LadderNavigator:
         self.edge = None
         self.target_floor = None
         self.grabbing = False
+        self.aligned_x = None
+        self.align_since = None
+        self.last_step = False
         self.best_distance = float("inf")
         self.landing_since = None
+        self.landing_floor = None
+        self.landing_y = None
+        self.last_target_seen = None
+        self.last_position_seen = None
+
+    def avoid_current(self, now):
+        if self.edge:
+            self.retry_after[(self.edge["from"], self.edge["x"])] = now + 30
+        self.reset()
+
+    def missing_position(self, now):
+        self.aligned_x = None
+        # Brief title occlusion may interrupt the feet measurement mid-climb.
+        if self.edge and now - self.last_position_seen > 0.45:
+            self.avoid_current(now)
+        if self.edge:
+            return self._traversal_command() if self.grabbing else Command(state="WAIT_FOR_FOOTING")
+        return None
+
+    def _traversal_command(self):
+        if self.edge["kind"] == "drop":
+            return Command(action="drop_through", state="DROP_THROUGH")
+        return Command(action="grab_ladder", state="CLIMB")
 
     def _start_route(self, floor, x, destinations, now):
         # Different entrances to the same platform have different walking costs.
@@ -33,56 +59,92 @@ class LadderNavigator:
                 self.edge, self.target_floor = first, here
                 self.last_progress = now
                 return
-            for edge in self.ladders:
+            for edge in self.connections:
                 if edge["from"] != here or self.retry_after.get((here, edge["x"]), 0) > now:
                     continue
-                height = self.platforms[here][2] - self.platforms[edge["to"]][2]
+                if edge["to"] == floor:
+                    continue
+                height = abs(self.platforms[here][2] - self.platforms[edge["to"]][2])
                 heappush(queue, (cost + abs(pos-edge["x"]) + height, next(order),
                                  edge["to"], edge["x"], first or edge))
 
     def tick(self, floor, position, destinations, now):
         if position is None:
-            self.reset()
-            return None
+            return self.missing_position(now)
         x, y = position
         # Reconsider the destination while still walking. Once airborne,
         # finish this ladder before accepting combat or another route.
-        if not self.grabbing and (floor in destinations or self.target_floor not in destinations):
+        if self.target_floor in destinations:
+            self.last_target_seen = now
+        if (self.edge and not self.grabbing and self.target_floor not in destinations
+                and now - self.last_target_seen > 1.0):
             self.reset()
         if not self.edge and floor and floor not in destinations:
             self._start_route(floor, x, destinations, now)
+            if self.edge:
+                self.last_target_seen = now
         if not self.edge:
             return None
+        self.last_position_seen = now
         edge = self.edge
         dx = edge["x"] - x
         top = self.platforms[edge["to"]][2]
+        dropping = edge["kind"] == "drop"
+        if floor != edge["from"] or abs(dx) > 8:
+            self.aligned_x = None
         if self.grabbing:
-            if floor == edge["to"] and abs(top-y) <= 5 and abs(dx) <= 24:
-                if self.landing_since is None:
+            # A missed grab can carry the character sideways during the jump.
+            # Release Up as soon as measured feet leave the ladder corridor.
+            if abs(dx) > 36 and (not dropping or floor == edge["from"]):
+                self.avoid_current(now)
+                return Command(state="LADDER_RETRY")
+            # A continuous rope can carry us past an intermediate platform.
+            # Require stable feet so crossing a platform in flight isn't a landing.
+            reached = floor == edge["to"] if dropping else floor and self.platforms[floor][2] <= top
+            if reached and abs(dx) <= 24:
+                if floor != self.landing_floor or abs(y - self.landing_y) > 5:
+                    self.landing_floor = floor
+                    self.landing_y = y
                     self.landing_since = now
                 elif now - self.landing_since >= 0.25:
                     self.reset()
                     return None
             else:
-                self.landing_since = None
-            distance = abs(y-top)
-            command = Command("none", "none", "grab_ladder", "CLIMB")
+                self.landing_floor = None
+            distance = top - y if dropping else y - top
+            command = self._traversal_command()
+        elif floor is None:
+            if now - self.last_progress > 1.6:
+                self.avoid_current(now)
+            return Command(state="WAIT_FOR_FOOTING")
         elif floor != edge["from"]:
             self.reset()
             return None
-        elif abs(dx) <= 12:
+        elif abs(dx) <= (12 if dropping else 8):
+            if not dropping:
+                if self.aligned_x is None or abs(x - self.aligned_x) > 2:
+                    self.aligned_x, self.align_since = x, now
+                if now - self.align_since < 0.12:
+                    return Command(state="ALIGN_LADDER")
             self.grabbing = True
             self.best_distance = float("inf")
             self.last_progress = now
             distance = abs(y-top)
-            command = Command("none", "none", "grab_ladder", "CLIMB")
+            command = self._traversal_command()
         else:
             distance = abs(dx)
-            command = Command("right" if dx > 0 else "left", "none", "none", "WALK_TO_LADDER")
+            state = "WALK_TO_DROP" if dropping else "WALK_TO_LADDER"
+            direction = "right" if dx > 0 else "left"
+            if not dropping and distance <= 40:
+                # Take a short step, then release and measure again before the next one.
+                self.last_step = not self.last_step
+                direction = f"face_{direction}" if self.last_step else "none"
+            else:
+                self.last_step = False
+            command = Command(direction, "none", "none", state)
         if distance < self.best_distance - 3:
             self.best_distance, self.last_progress = distance, now
         if now - self.last_progress >= 1.6:
-            self.retry_after[(edge["from"], edge["x"])] = now + 6
-            self.reset()
+            self.avoid_current(now)
             return Command(state="LADDER_RETRY")
         return command

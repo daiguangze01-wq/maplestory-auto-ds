@@ -46,6 +46,35 @@ class PlatformSurveyTest(unittest.TestCase):
         blank[:155, :243] = self.gray[:155, :243]
         self.assertIsNone(self.survey.register(blank))
 
+    def test_far_east_game_frame_routes_toward_upper_ghosts(self):
+        d = MonsterDetector(dict(self.detector.cfg, single_platform=False))
+        self.assertTrue(d.load_monster_images())
+        d._kb = Mock(input_status="Ready")
+        d.get_img_frame = Mock(return_value=cv2.imread("docs/assets/ghost-platforms-east.jpg"))
+        d.run_once()
+        self.assertEqual(d.platform_offset, (-1859, -120))
+        self.assertEqual(d.survey.platform_at(d.player_feet, d.platform_offset), "ground")
+        self.assertEqual((d.ladder_nav.edge["x"], d.ladder_nav.target_floor), (2629, "upper_east"))
+        self.assertEqual(d._kb.set_command.call_args.args, ("right none none",))
+        with patch.object(d.survey, "register", return_value=None):
+            d.run_once()
+            self.assertIsNone(d.ladder_nav.edge)
+        d.run_once()
+        self.assertEqual(d.ladder_nav.edge["x"], 2629)
+
+    def test_all_surveyed_platforms_have_connected_routes(self):
+        profile = self.survey.data
+        for edge in profile["connections"]:
+            for endpoint in ("from", "to"):
+                left, right, _ = profile["platforms"][edge[endpoint]]
+                self.assertLessEqual(left, edge["x"], edge)
+                self.assertLessEqual(edge["x"], right, edge)
+        for origin, (left, right, y) in profile["platforms"].items():
+            for target in profile["platforms"].keys() - {origin}:
+                nav = LadderNavigator(profile)
+                self.assertIsNotNone(nav.tick(origin, ((left+right)//2, y), {target}, 1),
+                                     (origin, target))
+
     def test_off_center_medal_requires_shape_and_color(self):
         detector = self.detector
         medal = detector.img_title[:, :, :3].copy()
@@ -97,6 +126,10 @@ class PlatformSurveyTest(unittest.TestCase):
             found[:] = [ledge]
             with patch.object(detector, "_detect_player_by_title"):
                 detector.run_once()
+                self.assertEqual(detector.position_source, "minimap")
+                self.assertEqual(detector._kb.set_command.call_args.args, ("face_right none attack",))
+            with patch.object(detector, "_detect_player_by_title"), patch.object(detector, "_detect_minimap", return_value=None):
+                detector.run_once()
                 self.assertIsNone(detector.player_feet)
                 self.assertEqual(detector._kb.set_command.call_args.args, ("none none none",))
             with patch.object(self.survey, "register", return_value=None):
@@ -140,7 +173,8 @@ class PlatformSurveyTest(unittest.TestCase):
         goal = {"middle_east"}
         self.assertEqual(nav.tick("ground", (1480,553), goal, 0).move_x, "right")
         self.assertEqual(nav.edge["x"], 1534)
-        self.assertEqual(nav.tick("ground", (1533,553), goal, 1).action, "grab_ladder")
+        self.assertEqual(nav.tick("ground", (1533,553), goal, 1).state, "ALIGN_LADDER")
+        self.assertEqual(nav.tick("ground", (1533,553), goal, 1.15).action, "grab_ladder")
         self.assertEqual(nav.tick(None, (1534,480), set(), 1.6).state, "CLIMB")
         nav.tick("lower_east", (1534,435), goal, 2)
         self.assertIsNone(nav.tick("lower_east", (1534,435), goal, 2.3))
@@ -159,10 +193,13 @@ class PlatformSurveyTest(unittest.TestCase):
             detector._title_last_seen_frame = detector.frame_count
         ghost = dict(position=(750, 250), size=(50, 50))
         with patch.object(detector, "_detect_player_by_title", side_effect=on_ground), patch.object(
-                detector.survey, "scan", return_value=[ghost]):
+                detector.survey, "scan", return_value=[ghost]), patch(
+                    "src.engine.MonsterDetector.time.monotonic", side_effect=[1, 1.2, 1.4, 1.6]):
             detector.run_once()
             self.assertEqual(detector.fsm.state, "WALK_TO_LADDER")
             x = detector.ladder_nav.edge["x"]
+            detector.run_once()
+            self.assertEqual(detector._kb.set_command.call_args.args, ("none none none",))
             detector.run_once()
             self.assertEqual(detector._kb.set_command.call_args.args, ("none none grab_ladder",))
             detector.cfg["bot"]["mode"] = "detect"
@@ -172,9 +209,206 @@ class PlatformSurveyTest(unittest.TestCase):
     def test_failed_grab_releases_and_tries_another_route(self):
         nav = LadderNavigator(self.survey.data)
         nav.tick("ground", (1534,553), {"middle_east"}, 0)
+        nav.tick("ground", (1534,553), {"middle_east"}, 0.2)
         self.assertEqual(nav.tick("ground", (1534,553), {"middle_east"}, 2).state, "LADDER_RETRY")
         self.assertEqual(nav.tick("ground", (1534,553), {"middle_east"}, 2.2).move_x, "right")
         self.assertEqual(nav.edge["x"], 2078)
+
+    def test_ledge_to_upper_right_via_left_walkway_and_middle(self):
+        d = MonsterDetector(dict(self.detector.cfg, single_platform=False))
+        d.load_monster_images()
+        d.get_img_frame = Mock(return_value=self.frame)
+        d._kb = Mock(input_status="Ready")
+        # The stored game frame has a bare ledge and targets to the right.
+        d.run_once()
+        self.assertEqual(d.ladder_nav.target_floor, "middle")
+        self.assertEqual(d.ladder_nav.edge["to"], "upper_left")
+        d.ladder_nav.reset()
+        right = next(m for m in d.visible_ghosts if d.survey.monster_platform(m, (0, 0)) == "upper_right")
+        x, y = 430, 380
+        def locate():
+            d.loc_player = (x, y - 30)
+            d._title_last_seen_frame = d.frame_count
+        with patch.object(d, "_detect_player_by_title", side_effect=locate), patch.object(
+                d.survey, "scan", return_value=[right]), patch("src.engine.MonsterDetector.time.monotonic") as clock:
+            clock.return_value = 1
+            for kind, entrance, landing_y in [("climb", 430, 210), ("drop", 818, 322),
+                                               ("climb", 1268, 210)]:
+                d.run_once()
+                self.assertEqual(d.ladder_nav.target_floor, "upper_right")
+                self.assertEqual((d.ladder_nav.edge["kind"], d.ladder_nav.edge["x"]), (kind, entrance))
+                walked = x != entrance
+                x = entrance
+                clock.return_value += 0.2
+                d.run_once()
+                if kind == "climb" and walked:
+                    self.assertEqual(d.fsm.state, "ALIGN_LADDER")
+                    clock.return_value += 0.2
+                    d.run_once()
+                self.assertEqual(d._kb.set_command.call_args.args,
+                                 ("none none " + ("drop_through" if kind == "drop" else "grab_ladder"),))
+                y = landing_y
+                clock.return_value += 0.4
+                d.run_once()
+                clock.return_value += 0.3
+                d.run_once()
+                self.assertIsNone(d.ladder_nav.edge)
+                if entrance != 1268:
+                    self.assertEqual(d._kb.set_command.call_args.args, ("none none none",))
+            self.assertEqual(d.fsm.state, "COMBAT_IN_PLACE")
+
+    def test_clear_current_floor_before_climbing_and_defend_on_approach(self):
+        d = MonsterDetector(dict(self.detector.cfg, single_platform=False))
+        d.load_monster_images()
+        d.get_img_frame = Mock(return_value=self.frame)
+        d._kb = Mock(input_status="Ready")
+        x = 930
+        def locate():
+            d.loc_player = (x, 523)
+            d._title_last_seen_frame = d.frame_count
+        found = [dict(position=(800, 385), size=(40, 40)), dict(position=(260, 510), size=(40, 40))]
+        with patch.object(d, "_detect_player_by_title", side_effect=locate), patch.object(
+                d.survey, "scan", return_value=found), patch(
+                    "src.engine.MonsterDetector.time.monotonic", side_effect=[i / 5 for i in range(20)]):
+            d.run_once()
+            self.assertEqual(d._kb.set_command.call_args.args, ("left none none",))
+            found.pop()
+            d.run_once()
+            self.assertEqual(d.fsm.state, "IDLE")
+            d.run_once()
+            self.assertEqual(d.fsm.state, "WALK_TO_LADDER")
+            found.append(dict(position=(950, 510), size=(40, 40)))
+            d.run_once()
+            self.assertEqual(d.fsm.state, "COMBAT_IN_PLACE")
+            self.assertIsNone(d.ladder_nav.edge)
+            found.pop()
+            d.run_once()
+            self.assertEqual(d.fsm.state, "IDLE")
+            x = 958
+            d.run_once()
+            self.assertEqual(d.fsm.state, "ALIGN_LADDER")
+            d.run_once()
+            self.assertEqual(d.fsm.state, "CLIMB")
+            found.append(dict(position=(950, 510), size=(40, 40)))
+            d.run_once()
+            self.assertEqual(d.fsm.state, "CLIMB")
+
+    def test_continuous_rope_overshoots_ledge_without_penalizing_entrance(self):
+        nav = LadderNavigator(self.survey.data)
+        nav.tick("ground", (430,553), {"upper_left"}, 0)
+        nav.tick("ground", (430,553), {"upper_left"}, 0.2)
+        self.assertEqual(nav.edge["to"], "ledge")
+        nav.tick("ledge", (430,380), {"upper_left"}, 0.8)
+        nav.tick(None, (430,300), {"upper_left"}, 1.1)
+        nav.tick("upper_left", (430,216), {"upper_left"}, 1.8)
+        self.assertIsNone(nav.tick("upper_left", (430,215), {"upper_left"}, 2.1))
+        self.assertFalse(nav.retry_after)
+
+    def test_near_scan_returns_client_coords_and_expands_on_miss(self):
+        detector = self.detector
+        detector.get_img_frame = Mock(return_value=self.frame)
+        feet_x = 450
+        def on_ground():
+            detector.loc_player = (feet_x, 523)
+            detector._title_last_seen_frame = detector.frame_count
+        with patch.object(detector, "_detect_player_by_title", side_effect=on_ground), patch.object(
+                self.survey, "scan", wraps=self.survey.scan) as scan:
+            detector.run_once()
+            self.assertEqual((detector.scan_scope, scan.call_count), ("full", 2))
+            full = detector.visible_ghosts
+            feet_x = 735
+            scan.reset_mock()
+            detector.run_once()
+            self.assertEqual((detector.scan_scope, scan.call_count), ("near", 1))
+            self.assertEqual([m["position"] for m in detector.attack_targets],
+                             [m["position"] for m in full if self.survey.monster_platform(m,(0,0)) == "ground"
+                              and m["position"][0] < 970])
+
+    def test_attack_nearby_unassigned_ghost_then_climb_to_upper_target(self):
+        cfg = dict(self.detector.cfg, single_platform=False)
+        d = MonsterDetector(cfg)
+        d.load_monster_images()
+        d._kb = Mock(input_status="Ready")
+        d.get_img_frame = Mock(return_value=self.frame)
+        def on_ground():
+            d.loc_player = (700, 523)
+            d._title_last_seen_frame = d.frame_count
+        ghosts = [dict(position=(710,370),size=(50,40)), dict(position=(610,590),size=(50,40)),
+                  dict(position=(800,625),size=(40,40))]
+        with patch.object(d, "_detect_player_by_title", side_effect=on_ground), patch.object(
+                d.survey, "scan", return_value=ghosts):
+            d.run_once()
+            self.assertTrue(d.attack_targets)
+            self.assertEqual(d.fsm.state, "COMBAT_IN_PLACE")
+            ghosts.pop(1)
+            d.run_once()
+            self.assertEqual(d.fsm.state, "IDLE")
+            d.run_once()
+            self.assertEqual(d.ladder_nav.target_floor, "lower")
+            self.assertEqual(d.fsm.state, "WALK_TO_LADDER")
+
+    def test_ladder_from_track_and_short_detection_gaps(self):
+        nav = LadderNavigator(self.survey.data)
+        self.assertEqual(nav.tick("track",(520,675),{"upper_left"},0).move_x,"right")
+        self.assertEqual(nav.tick("track",(560,675),set(),0.3).move_x,"right")
+        self.assertEqual(nav.tick("track",(620,675),{"upper_left"},0.45).state,"ALIGN_LADDER")
+        self.assertEqual(nav.tick("track",(620,675),{"upper_left"},0.6).state,"CLIMB")
+        self.assertEqual(nav.tick(None,None,set(),0.8).action,"grab_ladder")
+        self.assertIsNone(nav.tick(None,None,set(),1.2))
+        self.assertEqual(nav.tick("track",(620,675),{"upper_left"},1.3).move_x, "right")
+        self.assertEqual(nav.edge["x"], 1398)
+
+    def test_minimap_position_requires_one_live_dot_and_correct_map(self):
+        roi = np.zeros((74,230,3), dtype=np.uint8)
+        for x in (66, 80):
+            cv2.circle(roi, (x,46), 2, (30,255,255), -1)
+            point = self.survey.minimap_feet(roi, (6,67), (-392,-120), self.frame.shape)
+            if x == 66:
+                self.assertEqual(point, (607,421))
+            else:
+                self.assertIsNone(point)
+        self.assertIsNone(self.survey.minimap_feet(roi, (6,67), None, self.frame.shape))
+
+    def test_drift_past_west_ladder_does_not_turn_back_immediately(self):
+        nav = LadderNavigator(self.survey.data)
+        self.assertEqual(nav.tick("ground",(952,553),{"lower"},0).state, "ALIGN_LADDER")
+        self.assertEqual(nav.tick("ground",(952,553),{"lower"},0.2).state, "CLIMB")
+        self.assertEqual(nav.tick("ground",(1030,553),{"lower"},0.3).state, "LADDER_RETRY")
+        self.assertIsNotNone(nav.tick("ground",(1030,553),{"lower"},2))
+        self.assertNotEqual(nav.edge["x"], 958)
+
+    def test_west_ladder_waits_for_stable_feet_before_jump(self):
+        nav = LadderNavigator(self.survey.data)
+        def tick(x, t):
+            return nav.tick("ground", (x,553), {"upper_left"}, t)
+        self.assertEqual(tick(521, 0).move_x, "left")
+        self.assertEqual(tick(436, 0.2).state, "ALIGN_LADDER")
+        self.assertEqual(tick(430, 0.35).action, "none")  # still sliding
+        self.assertEqual(tick(328, 0.45).move_x, "right")  # at the portal
+        self.assertEqual(tick(405, 0.7).move_x, "face_right")
+        self.assertEqual(tick(428, 0.8).state, "ALIGN_LADDER")
+        self.assertEqual(tick(429, 1.0).action, "grab_ladder")
+        self.assertEqual(nav.tick(None, (375,510), {"upper_left"}, 1.2).state, "LADDER_RETRY")
+
+    def test_occluded_medal_uses_current_frame_and_rejects_ambiguity(self):
+        d = self.detector
+        medal = d.img_title[:, :, :3]
+        h, w = medal.shape[:2]
+        half = w//2
+        blank = np.zeros((480,800,3), np.uint8)
+        def locate(frame):
+            d.frame_count += 1
+            d.img_frame = frame
+            d.img_frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            d._detect_player_by_title()
+            return d._title_last_seen_frame == d.frame_count
+        image = blank.copy()
+        image[320:320+h, 400+half:400+w] = medal[:,half:]
+        self.assertTrue(locate(image))
+        self.assertEqual(d.loc_title,(400,320))
+        self.assertFalse(locate(blank))
+        image[280:280+h, 330+half:330+w] = medal[:,half:]
+        self.assertFalse(locate(image))
 
 
 if __name__ == "__main__":

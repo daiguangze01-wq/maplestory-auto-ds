@@ -1,5 +1,6 @@
 bot:
   mode: "hunt" # detect = 只检测不攻击, hunt
+  pickup_interval: 0           # 0 表示关闭脚本自动拾取
   chase_visible: true           # 幽灵地图全屏找怪，沿当前平台接近可攻击目标
   jump_attack: true
   jump_attack_interval: 0.65   # 两次起跳之间的最短秒数
@@ -25,6 +26,7 @@ key:
 title:
   template: "character/medal_green.png"
   confirm_unique_color: true    # 画面边缘也可按勋章的形状和颜色确认唯一候选
+  partial_green_medal: true    # 遮挡时用可见半边的颜色和字形定位
   enable: true
   mode: "grayscale"           # 当前这张 title.png 建议先用 grayscale；如果现场干扰多再切 white_mask
   manual_select: true          # 在监视器窗口里点击称号候选框，手动锁定自己的角色

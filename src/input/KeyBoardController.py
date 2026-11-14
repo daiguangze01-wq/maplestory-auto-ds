@@ -431,6 +431,17 @@ class KeyBoardController():
                 if self.is_need_force_heal:
                     action = "add_hp"
                     self._last_action = None
+                if action == "drop_through":
+                    if self._last_action == action:
+                        return self._apply_holds("none", "none", "none")
+                    if not self._apply_holds("none", "down", "none"):
+                        return False
+                    try:
+                        if self._command[2] == action and self.press_key_safe(self.cfg["key"]["jump"], 0.08, "drop through"):
+                            self._last_action = action
+                    finally:
+                        key_up("down")
+                    return self._last_action == action
                 if action == "grab_ladder":
                     if self._last_action != action:
                         if not self._apply_holds("none", "none", "none"):

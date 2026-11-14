@@ -2,6 +2,11 @@
 reference: ../../docs/assets/ghost-platforms.jpg
 width: 1280
 feet_offset: [0, 30]
+# Calibrated for the expanded minimap. Dot coordinates are local to its terrain ROI.
+minimap_tracking:
+  roi: [6, 67, 230, 74]
+  scale: [15.85, 15.55]
+  origin: [-47, -174]
 # Map name on the fixed minimap header. Camera registration uses scenery only.
 map_label: [45, 27, 160, 57]
 anchors:
@@ -19,20 +24,50 @@ anchors:
 extra_landmarks:
   image: east-landmarks.png
   patch_height: 22
-  origins: [[1629,346], [2029,346], [1299,430], [1709,200], [2139,522], [1361,552]]
+  origins:
+    - [1629,346]
+    - [2029,346]
+    - [1299,430]
+    - [1709,200]
+    - [2139,522]
+    - [1361,552]
+    # Far-east view registered to the previous view at offset (-1859,-120).
+    - [2049,344]
+    - [2317,204]
+    - [2301,340]
+    - [2581,348]
+    - [2603,434]
+    - [2673,344]
+    - [2889,432]
+    - [3021,198]
+    # Right wall and exit sign stay visible even while the train passes.
+    - [3111,380]
+    - [3225,376]
+    - [3289,290]
+    - [3385,434]
 # x start, x end, standing y. Split the upper walkway at its gap.
 platforms:
   upper_left: [360, 905, 210]
   upper_right: [1120, 1832, 210]
-  upper_east: [2045, 2288, 210]
+  upper_east: [2045, 2762, 210]
+  upper_far_east: [2975, 3099, 210]
   middle: [695, 1329, 322]
   middle_east: [1579, 2215, 351]
+  middle_far_east: [2675, 3059, 351]
   ledge: [360, 487, 380]
   lower: [528, 1074, 435]
   lower_east: [1288, 1752, 435]
-  ground: [215, 2288, 553]
+  lower_far_east: [2299, 2931, 435]
+  ground: [215, 3340, 553]
+  track: [215, 3340, 675]
+# Map-space floor positions of the two exits, for the survey overlay.
+portals: [[310,553], [3273,553]]
 # Each connector is a one-way candidate until its landing is observed in game.
 connections:
+  - {kind: climb, x: 620, from: track, to: ground, verified: false}
+  - {kind: climb, x: 1398, from: track, to: ground, verified: false}
+  - {kind: climb, x: 2354, from: track, to: ground, verified: false}
+  - {kind: climb, x: 2916, from: track, to: ground, verified: false}
   - {kind: climb, x: 430, from: ledge, to: upper_left, verified: false}
   - {kind: climb, x: 430, from: ground, to: ledge, verified: false}
   - {kind: climb, x: 740, from: lower, to: middle, verified: false}
@@ -43,9 +78,26 @@ connections:
   - {kind: climb, x: 1747, from: lower_east, to: middle_east, verified: false}
   - {kind: climb, x: 2078, from: ground, to: middle_east, verified: false}
   - {kind: climb, x: 1644, from: middle_east, to: upper_right, verified: false}
+  - {kind: climb, x: 2629, from: ground, to: lower_far_east, verified: false}
+  - {kind: climb, x: 2340, from: lower_far_east, to: upper_east, verified: false}
+  - {kind: climb, x: 2600, from: lower_far_east, to: upper_east, verified: false}
+  - {kind: climb, x: 3036, from: middle_far_east, to: upper_far_east, verified: false}
   - {kind: drop, x: 462, from: ledge, to: ground, verified: false}
   - {kind: drop, x: 803, from: middle, to: lower, verified: false}
   - {kind: drop, x: 640, from: lower, to: ground, verified: false}
+  # Drop onto the first platform below the marked x, away from ladder entrances.
+  - {kind: drop, x: 818, from: upper_left, to: middle, verified: false}
+  - {kind: drop, x: 1190, from: upper_right, to: middle, verified: false}
+  - {kind: drop, x: 1688, from: upper_right, to: middle_east, verified: false}
+  - {kind: drop, x: 1860, from: middle_east, to: ground, verified: false}
+  - {kind: drop, x: 1470, from: lower_east, to: ground, verified: false}
+  - {kind: drop, x: 2150, from: upper_east, to: middle_east, verified: false}
+  - {kind: drop, x: 2710, from: upper_east, to: middle_far_east, verified: false}
+  - {kind: drop, x: 2820, from: middle_far_east, to: lower_far_east, verified: false}
+  - {kind: drop, x: 2500, from: lower_far_east, to: ground, verified: false}
+  - {kind: drop, x: 3003, from: upper_far_east, to: middle_far_east, verified: false}
+  - {kind: drop, x: 950, from: ground, to: track, verified: false}
+  - {kind: drop, x: 2500, from: ground, to: track, verified: false}
 # Fixed HUD rectangles in the reference client. The bottom bar is anchored
 # to the client bottom on live frames; the reference image is cropped at y=650.
 playfield_bottom: 650

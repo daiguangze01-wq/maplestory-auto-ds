@@ -62,7 +62,6 @@ class MonsterDetector:
         self.attack_targets = []
         self.survey = None
         self.ladder_nav = None
-        self._upper_targets_since = None
         self.chase_visible = (cfg["bot"].get("chase_visible", False)
                               and not cfg.get("single_platform") and not cfg["bot"].get("enable_route")
                               and tuple(cfg["monster_detect"].get("monsters", ())) == ("ghost",))
@@ -70,6 +69,7 @@ class MonsterDetector:
         self.platform_offset = None
         self.player_feet = None
         self.locked_platform = None
+        self.floor_pending_clear = None
 
         # Frame data
         self.frame = None               # Raw captured frame
@@ -82,6 +82,8 @@ class MonsterDetector:
         self.loc_player = (0, 0)
         self.loc_title = None  # Last known title position (for fast local search)
         self._title_last_seen_frame = -1
+        self.position_source = None
+        self._reset_route_requested = threading.Event()
         self._title_state_lock = threading.Lock()
         self._title_candidates_snapshot = []
         self._manual_title_locked = False
@@ -118,6 +120,7 @@ class MonsterDetector:
         self.img_title_gray = None
         self.title_mask = None
         self.title_color_pixels = None
+        self.partial_medal = None
         title_path = cfg.get("title", {}).get("template", "character/title.png")
         if os.path.exists(title_path):
             self.img_title = load_image(title_path, cv2.IMREAD_UNCHANGED)
@@ -137,6 +140,8 @@ class MonsterDetector:
                     color = colors[pixels]
                     self.title_chroma = color - color.mean(axis=1, keepdims=True)
                     self.title_chroma_power = np.sum(self.title_chroma ** 2, axis=1)
+                    if cfg.get("title", {}).get("partial_green_medal") and self.title_mask is not None:
+                        self.partial_medal = self._green_contrast(self.img_title[:, :, :3])
             logger.info(f"  Loaded title template: {title_path} {self.img_title.shape[1]}x{self.img_title.shape[0]}")
         else:
             logger.warning(f"  Missing player title template: {title_path}")
@@ -714,6 +719,7 @@ class MonsterDetector:
             self._title_lock_miss_count = 0
         self.loc_title = None
         self._title_last_seen_frame = -1
+        self._reset_route_requested.set()
         logger.info("[Title] Cleared manual title selection")
 
     def _draw_title_candidates(self):
@@ -755,6 +761,50 @@ class MonsterDetector:
             2,
             cv2.LINE_AA,
         )
+
+    @staticmethod
+    def _green_contrast(image):
+        b, g, r = cv2.split(image)
+        return cv2.subtract(g, cv2.addWeighted(b, 0.5, r, 0.5, 0))
+
+    def _partial_medal_candidate(self, radius):
+        """Recover the full title origin from either visible half of the green medal."""
+        h, w = self.partial_medal.shape
+        fh, fw = self.img_frame_gray.shape
+        x0, y0, x1, y1 = 0, 0, fw, fh
+        if self.loc_title is not None:
+            x, y = self.loc_title
+            x0, y0 = max(0, x-radius), max(0, y-radius)
+            x1, y1 = min(fw, x+w+radius), min(fh, y+h+radius)
+        if x1-x0 < w or y1-y0 < h:
+            return None
+        contrast = self._green_contrast(self.img_frame[y0:y1,x0:x1])
+        matches = []
+        for left, right in ((0, w//2), (w//2, w)):
+            mask = self.title_mask[:, left:right]
+            scores = cv2.matchTemplate(contrast, self.partial_medal[:, left:right],
+                                       cv2.TM_SQDIFF_NORMED, mask=mask)
+            scores[~np.isfinite(scores)] = 1
+            for _ in range(4):
+                error, _, (cx, cy), _ = cv2.minMaxLoc(scores)
+                if error > 0.17:
+                    break
+                scores[max(0,cy-h//2):cy+h//2+1, max(0,cx-w//4):cx+w//4+1] = 1
+                x, y = x0+cx-left, y0+cy
+                if not (0 <= x <= fw-w and 0 <= y <= fh-h):
+                    continue
+                gray = self.img_frame_gray[y:y+h, x+left:x+right]
+                shape = cv2.matchTemplate(gray, self.img_title_gray[:, left:right],
+                                          cv2.TM_SQDIFF_NORMED, mask=mask)[0,0]
+                if shape < 0.095:
+                    matches.append((error + float(shape), (x, y)))
+        if not matches:
+            return None
+        score, (x,y) = min(matches)
+        if any(abs(cx-x) > 8 or abs(cy-y) > 4 for _, (cx,cy) in matches):
+            return None
+        return {"loc": (x,y), "score": score, "cost": score, "box": (x,y,w,h),
+                "src": "partial_medal"}
 
     def _title_color_matches(self, loc):
         """Confirm that the opaque colored markings also occur in the live crop."""
@@ -906,6 +956,11 @@ class MonsterDetector:
                 max_candidates=max_candidates,
                 score_threshold=candidate_threshold,
             )
+            partial = None
+            if self.partial_medal is not None and not candidate_pool:
+                partial = self._partial_medal_candidate(max_jump_px)
+                if partial:
+                    candidate_pool = [partial]
             self._update_title_candidates_snapshot(candidate_pool, (tw, th))
 
             with self._title_state_lock:
@@ -934,7 +989,7 @@ class MonsterDetector:
                     default=None,
                 )
 
-                if manual_best is not None and manual_best["score"] <= manual_track_threshold:
+                if manual_best is not None and (manual_best is partial or manual_best["score"] <= manual_track_threshold):
                     loc = manual_best["loc"]
                     score = manual_best["score"]
                     match_src = "manual"
@@ -1010,7 +1065,9 @@ class MonsterDetector:
                 near_lock = not had_lock or np.hypot(
                     candidate["loc"][0] - self.loc_title[0],
                     candidate["loc"][1] - self.loc_title[1]) <= max_jump_px
-                if near_lock and self._title_color_matches(candidate["loc"]):
+                if near_lock and partial is not None:
+                    candidates = [partial]
+                elif near_lock and self._title_color_matches(candidate["loc"]):
                     candidates = [dict(candidate, src="unique_color")]
 
             if not manual_locked and not candidates:
@@ -1081,9 +1138,10 @@ class MonsterDetector:
             return
 
         threshold = candidate_threshold if match_src == "unique_color" else match_threshold
+        accepted = score < threshold or match_src in ("prev_keep", "manual", "manual_hold", "partial_medal")
         # Log score every frame for first 100 frames, then every 30 frames
         if self.frame_count <= 100 or self.frame_count % 30 == 0:
-            status = "HIT" if (score < threshold or match_src in ("manual", "manual_hold", "prev_keep")) else "MISS"
+            status = "HIT" if accepted else "MISS"
             logger.info(
                 f"[Title] frame={self.frame_count} score={score:.4f} "
                 f"thresh={threshold:.3f} {status} src={match_src} mode={mode}"
@@ -1091,7 +1149,7 @@ class MonsterDetector:
             if 'rejected' in locals() and rejected:
                 logger.info(f"[Title] Rejected candidates: {rejected[:3]}")
 
-        if score < threshold or match_src in ("prev_keep", "manual", "manual_hold"):
+        if accepted:
             observed = match_src not in ("prev_keep", "manual_hold")
             # Anti-jump guard: reject sudden large jumps unless score is very confident.
             if self.loc_title is not None and match_src not in ("prev_keep", "manual_hold"):
@@ -1337,7 +1395,7 @@ class MonsterDetector:
         """Draw the player position marker on the debug frame."""
         if self.img_frame_debug is None:
             return
-        if self._title_last_seen_frame != self.frame_count:
+        if self.position_source is None:
             label = "Player: last seen" if self.loc_title is not None else "Player: not located"
             cv2.putText(self.img_frame_debug, label, (10, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 180, 255), 2)
@@ -1348,7 +1406,7 @@ class MonsterDetector:
             color=(0, 0, 255), thickness=-1
         )
         cv2.putText(
-            self.img_frame_debug, "Player",
+            self.img_frame_debug, "Player (minimap)" if self.position_source == "minimap" else "Player",
             (self.loc_player[0] - 25, self.loc_player[1] - 20),
             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2
         )
@@ -1527,11 +1585,15 @@ class MonsterDetector:
             0 on success, -1 if frame capture failed.
         """
         self.frame_count += 1
+        self.position_source = None
+        if self._reset_route_requested.is_set():
+            self._reset_route_requested.clear()
+            if self.ladder_nav:
+                self.ladder_nav.avoid_current(time.monotonic())
 
         # Capture frame
         self.img_frame = self.get_img_frame()
         if self.img_frame is None:
-            self._upper_targets_since = None
             if self.ladder_nav:
                 self.ladder_nav.reset()
             self.visible_ghosts = []
@@ -1634,6 +1696,18 @@ class MonsterDetector:
 
         # Detect player via title template matching
         self._detect_player_by_title()
+        seen = self._title_last_seen_frame == self.frame_count
+        self.position_source = "title" if seen else None
+        if self.survey:
+            self.platform_offset = self.survey.register(self.img_frame_gray)
+            self.player_feet = self.survey.feet(self.loc_player if seen else None)
+            if not seen and self.cfg.get("title", {}).get("enable", True):
+                self.player_feet = self.survey.minimap_feet(self.img_minimap, self.loc_minimap,
+                                                           self.platform_offset, self.img_frame.shape)
+                if self.player_feet is not None:
+                    dx, dy = self.survey.data["feet_offset"]
+                    self.loc_player = (self.player_feet[0]-dx, self.player_feet[1]-dy)
+                    self.position_source = "minimap"
 
         # Compute search region (same formula for detection & display)
         margin = self.cfg["monster_detect"].get("search_box_margin", 50)
@@ -1656,11 +1730,24 @@ class MonsterDetector:
         # ---------------------------------------------------------------
         interval = self.cfg["monster_detect"].get("detection_interval", 2)
         if self.survey:
-            self.platform_offset = self.survey.register(self.img_frame_gray)
-            seen = self._title_last_seen_frame == self.frame_count
-            self.player_feet = self.survey.feet(self.loc_player if seen else None)
-            self.visible_ghosts = self.survey.scan(self.img_frame, self.img_frame_gray)
-            # One scan per captured frame. Combat and the overlay use the same
+            floor = self.survey.platform_at(self.player_feet, self.platform_offset)
+            near = []
+            if self.player_feet and not self.cfg.get("observe") and not (self.ladder_nav and self.ladder_nav.edge):
+                near = self.survey.scan(self.img_frame, self.img_frame_gray, (x0, y0, x1, y1))
+            # Only skip the wide scan for actionable local combat. A nearby
+            # ghost on another floor must not hide the route to an upper floor.
+            def local_target(m):
+                x, y = m["position"]
+                h, w = m["size"]
+                return (abs(x + w//2 - px) <= reach_x and top <= y + h//2 <= bottom
+                        and floor is not None and self.survey.monster_platform(m, self.platform_offset) == floor)
+            if any(local_target(m) for m in near) and not (self.ladder_nav and self.ladder_nav.edge):
+                self.visible_ghosts = near
+                self.scan_scope = "near"
+            else:
+                self.visible_ghosts = self.survey.scan(self.img_frame, self.img_frame_gray)
+                self.scan_scope = "full"
+            # Combat and the overlay use the same
             # observations, never a far-field box cached before a camera pan.
             self.monsters = [m for m in self.visible_ghosts
                              if x0 <= m["position"][0] + m["size"][1] // 2 <= x1
@@ -1680,7 +1767,7 @@ class MonsterDetector:
             if abs(m["position"][0] + m["size"][1] // 2 - px) <= reach_x
             and top <= m["position"][1] + m["size"][0] // 2 <= bottom
         ]
-        if self.cfg.get("title", {}).get("enable", True) and self._title_last_seen_frame != self.frame_count:
+        if self.cfg.get("title", {}).get("enable", True) and self.position_source is None:
             self.attack_targets = []
         single_platform = self.cfg.get("single_platform", False)
         if single_platform:
@@ -1697,33 +1784,49 @@ class MonsterDetector:
                                                       self.visible_ghosts, self.loc_player, reach_x, reach_y)
         ladder_command = None
         if self.ladder_nav:
-            can_navigate = (self.cfg["bot"]["mode"] == "hunt" and self.player_feet is not None
-                            and self.platform_offset is not None
-                            and (not self._kb or self._kb.input_status == "Ready"))
-            if can_navigate:
-                floor = self.survey.platform_at(self.player_feet, self.platform_offset)
-                position = tuple(a-b for a, b in zip(self.player_feet, self.platform_offset))
-                destinations = {self.survey.monster_platform(m, self.platform_offset) for m in self.visible_ghosts}
-                platforms = self.survey.data["platforms"]
-                now = time.monotonic()
-                only_above = floor and destinations and all(
-                    dest and platforms[dest][2] < platforms[floor][2] for dest in destinations)
-                if only_above and self.attack_targets:
-                    if self._upper_targets_since is None:
-                        self._upper_targets_since = now
-                elif floor or not destinations:
-                    self._upper_targets_since = None
-                climb = (self.ladder_nav.grabbing or (only_above and not self.attack_targets)
-                         or (only_above and self.ladder_nav.edge is not None)
-                         or (only_above and self._upper_targets_since is not None and now - self._upper_targets_since >= 2)
-                         or (not self.attack_targets and approach == "none"))
-                if climb:
-                    ladder_command = self.ladder_nav.tick(floor, position, destinations, now)
-                else:
-                    self.ladder_nav.reset()
-            else:
-                self._upper_targets_since = None
+            now = time.monotonic()
+            if self.cfg["bot"]["mode"] != "hunt" or (self._kb and self._kb.input_status != "Ready"):
                 self.ladder_nav.reset()
+            elif self.player_feet is None or self.platform_offset is None:
+                if self.platform_offset is None:
+                    # Losing the camera reference is not evidence of a failed ladder.
+                    self.ladder_nav.reset()
+                else:
+                    ladder_command = self.ladder_nav.missing_position(now)
+            else:
+                position = tuple(a-b for a, b in zip(self.player_feet, self.platform_offset))
+                by_floor = {}
+                for ghost in self.visible_ghosts:
+                    dest = self.survey.monster_platform(ghost, self.platform_offset)
+                    by_floor.setdefault(dest, []).append(ghost)
+                platforms = self.survey.data["platforms"]
+                destinations = set(by_floor) - {None}
+                other_floors = destinations - {floor} if floor else set()
+                same_floor = by_floor.get(floor, ()) if floor else ()
+                local_attack = [m for m in self.attack_targets if m in same_floor or m in by_floor.get(None, ())]
+                if self.ladder_nav.grabbing:
+                    ladder_command = self.ladder_nav.tick(floor, position, destinations, now)
+                    if ladder_command is None:
+                        # On landing, release the traversal keys before planning the next leg.
+                        # An upper target in the skill box must not trigger a jump in between.
+                        self.attack_targets = [m for m in self.attack_targets if m in by_floor.get(floor, ())]
+                        approach = "none"
+                elif floor and (same_floor or local_attack):
+                    self.ladder_nav.reset()
+                    self.floor_pending_clear = floor
+                    self.attack_targets = local_attack
+                    approach = self.survey.approach_direction(self.player_feet, self.platform_offset,
+                                                              same_floor, self.loc_player, reach_x, reach_y)
+                elif floor and floor == self.floor_pending_clear:
+                    # One full-screen miss can be a ghost changing animation.
+                    self.floor_pending_clear = None
+                    self.attack_targets = []
+                    approach = "none"
+                elif self.ladder_nav.edge:
+                    ladder_command = self.ladder_nav.tick(floor, position, destinations, now)
+                elif other_floors:
+                    upper = {dest for dest in other_floors if platforms[dest][2] < platforms[floor][2]}
+                    ladder_command = self.ladder_nav.tick(floor, position, upper or other_floors, now)
         perception = Perception(
             mode=self.cfg["bot"].get("mode", "detect"),
             attack_style=self.cfg["bot"]["attack"],
@@ -1741,12 +1844,20 @@ class MonsterDetector:
             approach_direction=approach,
             ladder_command=ladder_command,
         )
+        previous_state = self.fsm.state
         command = self.fsm.tick(perception)
         if self._kb:
             self._kb.set_command(f"{command.move_x} {command.move_y} {command.action}")
+            if self.ladder_nav and command.state != previous_state and (
+                    ladder_command or previous_state in ("WALK_TO_LADDER", "ALIGN_LADDER", "CLIMB", "WALK_TO_DROP",
+                                                          "DROP_THROUGH", "LADDER_RETRY", "WAIT_FOR_FOOTING")):
+                logger.info(f"[Ladder] {previous_state} -> {command.state} floor={floor} "
+                            f"feet={self.player_feet} offset={self.platform_offset} "
+                            f"target={self.ladder_nav.target_floor} next={self.ladder_nav.edge}")
             if perception.mode == "hunt" and self.frame_count % 30 == 0:
                 logger.info(
                     f"[Hunt] monsters={len(self.monsters)} visible={len(self.visible_ghosts) if self.survey else '-'} "
+                    f"scan={self.scan_scope if self.survey else 'local'} player={self.position_source} "
                     f"in_range={perception.monster_count} state={command.state} "
                     f"dispatch=({command.move_x},{command.move_y},{command.action}) "
                     f"on_ladder={self.is_on_ladder} input={self._kb.input_status} "
@@ -1823,6 +1934,7 @@ class MonsterDetector:
             if self.survey:
                 status = (f"Locked {self.locked_platform or '?'}" if single_platform else
                           f"{command.state} {command.move_x}" if perception.mode == "hunt" else "Observe")
+                status += f" / {self.scan_scope}"
                 if self.platform_offset is None:
                     status += " / unmapped"
                 self.survey.draw(self.img_frame_debug, self.platform_offset, self.player_feet,
