@@ -9,6 +9,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import Mock
 
 import cv2
 import numpy as np
@@ -45,6 +46,7 @@ class _KBStub:
     def __init__(self):
         self.commands = []
         self.is_enable = True
+        self.input_status = "Ready"
 
     def set_command(self, cmd: str):
         self.commands.append(cmd)
@@ -112,6 +114,26 @@ class FsmIntegrationTest(unittest.TestCase):
 
         self.assertIsNotNone(detector.img_frame_debug)
         detector._update_debug_overlay()  # 不抛异常即通过
+
+    def test_attack_stops_when_last_target_leaves_skill_rectangle(self):
+        cfg = _load_cfg()
+        cfg["title"]["enable"] = False
+        cfg["directional_attack"].update(range_x=250, range_y=150)
+        detector = MonsterDetector(cfg, test_image=self.tmp)
+        detector.is_show_debug = False
+        detector._kb = _KBStub()
+        # Synthetic player at (400, 300). Include the boundary, exclude the search margin.
+        inside = {"name": "ghost", "position": (640, 440), "size": (20, 20)}
+        outside_x = dict(inside, position=(641, 440))
+        outside_y = dict(inside, position=(640, 441))
+        detector.get_monsters_in_range = Mock(side_effect=[
+            [inside, outside_x, outside_y], [outside_x, outside_y], [],
+        ])
+        for _ in range(3):
+            self.assertEqual(detector.run_once(), 0)
+        self.assertEqual(detector._kb.commands, [
+            "face_right none attack", "none none none", "none none none",
+        ])
 
 
 if __name__ == "__main__":

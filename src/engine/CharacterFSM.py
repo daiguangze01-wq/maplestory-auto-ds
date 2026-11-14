@@ -171,6 +171,8 @@ class CharacterFSM:
         else:
             new_state = STATE_DETECT
 
+        if (p.monster_count <= 0 or p.mode != "hunt") and action in ("attack", "aoe"):
+            action = "none"
         self._advance_state(new_state)
         return Command(move_x=move_x, move_y=move_y, action=action, state=self.state)
 
@@ -336,7 +338,7 @@ class CharacterFSM:
             self._hunt_search_last_reason = "pause"
             return "none", "none", "none"
 
-        action = "attack" if bool(cfg.get("search_attack_while_move", True)) else "none"
+        action = "none"
 
         # 搜索时随机跳（唯一的随机行为）
         jump_chance = float(cfg.get("search_random_jump_chance", 0.0))

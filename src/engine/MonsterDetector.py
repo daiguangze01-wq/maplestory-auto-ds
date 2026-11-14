@@ -57,6 +57,7 @@ class MonsterDetector:
         # Monster data
         self.monsters_info: dict = {}   # {name: [(img, mask), ...]}
         self.monsters: list = []        # Detected monsters in current frame
+        self.attack_targets = []
 
         # Frame data
         self.frame = None               # Raw captured frame
@@ -1299,13 +1300,13 @@ class MonsterDetector:
         )
 
     def _get_attack_facing(self) -> str:
-        """Return left/right facing toward the nearest detected monster."""
-        if not self.monsters:
+        """Face the nearest target within attack range."""
+        if not self.attack_targets:
             return "none"
 
         px, _ = self.loc_player
         nearest_dx = None
-        for m in self.monsters:
+        for m in self.attack_targets:
             mx, _ = m.get("position", (0, 0))
             mh, mw = m.get("size", (0, 0))
             cx = mx + (mw // 2)
@@ -1404,6 +1405,8 @@ class MonsterDetector:
         ]
 
         if self.cfg.get("bot", {}).get("mode", "detect") == "hunt":
+            if self._kb:
+                texts.append(f"Input: {self._kb.input_status} | In range: {len(self.attack_targets)}")
             texts.append(
                 f"Search: noMob={self.fsm.no_monster_frames} dir={self.fsm.search_dir} "
                 f"sweeps={self.fsm.search_sweeps} stall={self.fsm.search_stall_frames} "
@@ -1564,11 +1567,12 @@ class MonsterDetector:
         # Compute search region (same formula for detection & display)
         margin = self.cfg["monster_detect"].get("search_box_margin", 50)
         if self.cfg["bot"]["attack"] == "aoe_skill":
-            dx = self.cfg["aoe_skill"]["range_x"] // 2 + margin
-            dy = self.cfg["aoe_skill"]["range_y"] // 2 + margin
+            reach_x = self.cfg["aoe_skill"]["range_x"] // 2
+            reach_y = self.cfg["aoe_skill"]["range_y"] // 2
         else:
-            dx = self.cfg["directional_attack"]["range_x"] + margin
-            dy = self.cfg["directional_attack"]["range_y"] + margin
+            reach_x = self.cfg["directional_attack"]["range_x"]
+            reach_y = self.cfg["directional_attack"]["range_y"]
+        dx, dy = reach_x + margin, reach_y + margin
 
         x0 = max(0, self.loc_player[0] - dx)
         x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
@@ -1593,12 +1597,20 @@ class MonsterDetector:
                     f"Detected {len(self.monsters)} monsters: {names}"
                 )
 
+        px, py = self.loc_player
+        self.attack_targets = [
+            m for m in self.monsters
+            if abs(m["position"][0] + m["size"][1] // 2 - px) <= reach_x
+            and abs(m["position"][1] + m["size"][0] // 2 - py) <= reach_y
+        ]
+        if self.cfg.get("title", {}).get("enable", True) and self._title_last_seen_frame != self.frame_count:
+            self.attack_targets = []
         progress_x, progress_src = self._get_hunt_search_progress_x()
         perception = Perception(
             mode=self.cfg["bot"].get("mode", "detect"),
             attack_style=self.cfg["bot"]["attack"],
             attack_in_place=self.cfg.get("directional_attack", {}).get("attack_in_place", False),
-            monster_count=len(self.monsters),
+            monster_count=len(self.attack_targets),
             facing=self._get_attack_facing(),
             is_on_ladder=self.is_on_ladder,
             frame_count=self.frame_count,
@@ -1612,15 +1624,19 @@ class MonsterDetector:
             self._kb.set_command(f"{command.move_x} {command.move_y} {command.action}")
             if perception.mode == "hunt" and self.frame_count % 30 == 0:
                 logger.info(
-                    f"[Hunt] monsters={perception.monster_count} state={command.state} "
+                    f"[Hunt] monsters={len(self.monsters)} in_range={perception.monster_count} state={command.state} "
                     f"dispatch=({command.move_x},{command.move_y},{command.action}) "
-                    f"on_ladder={self.is_on_ladder}"
+                    f"on_ladder={self.is_on_ladder} input={self._kb.input_status} "
+                    f"held={self._kb.pressed_keys()}"
                 )
 
         # Always draw decorations on debug frame
         if self.is_show_debug:
             self._update_debug_overlay()        # Text first (bottom layer)
             self._draw_search_region(x0, y0, x1, y1)  # Search border
+            if perception.mode == "hunt":
+                cv2.rectangle(self.img_frame_debug, (px - reach_x, py - reach_y),
+                              (px + reach_x, py + reach_y), (0, 165, 255), 2)
             # Draw minimap rectangle (matches reference project)
             if self.img_minimap is not None:
                 draw_rectangle(
@@ -1738,8 +1754,9 @@ class MonsterDetector:
             try:
                 self.run_once()
             except Exception as e:
+                if self._kb:
+                    self._kb.set_command("stop stop stop")
                 logger.error(f"[MonsterDetector] Frame processing error: {e}")
-                continue
 
             # Cap FPS (matches reference project pattern)
             frame_duration = time.time() - t_start

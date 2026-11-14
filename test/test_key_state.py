@@ -104,6 +104,24 @@ class KeyStateTrackerTest(unittest.TestCase):
             ("down", "left"), ("up", "left"), ("down", "right"), ("up", "right"),
         ])
 
+    def test_attack_only_held_when_allowed_and_focused(self):
+        self.kb.game_has_higher_integrity = True
+        self.tick("face_right none attack")
+        self.assertIn("privileges", self.kb.input_status)
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.kb.pressed_keys(), [])
+        self.kb.game_has_higher_integrity = False
+        self.kb.is_game_window_active = lambda: False
+        self.kb._tick()
+        self.assertEqual(self.kb.input_status, "Waiting for game focus")
+        self.assertEqual(self.events, [])
+        self.kb.is_game_window_active = lambda: True
+        self.kb._tick()
+        self.assertEqual(self.kb.pressed_keys(), ["x"])
+        self.kb.is_game_window_active = lambda: False
+        self.kb._tick()
+        self.assertEqual(self.events[-2:], [("down", "x"), ("up", "x")])
+
     def test_turn_and_tap_while_climbing(self):
         self.tick("right up none")
         self.events.clear()
@@ -130,17 +148,18 @@ class KeyStateTrackerTest(unittest.TestCase):
                 self.tick(f"none none {action}")
                 self.assertEqual(self.events, [("down", key), ("up", key)] * 2)
 
-    def test_attack_cooldowns_with_held_movement(self):
-        for action, key in (("attack", "x"), ("aoe", "a")):
-            with self.subTest(action=action):
-                self.tick("left none none")
-                self.events.clear()
-                with patch.object(kbc.time, "time", return_value=100) as now:
-                    self.tick(f"left none {action}")
-                    self.tick(f"left none {action}")
-                    now.return_value += 2
-                    self.tick(f"left none {action}")
-                self.assertEqual(self.events, [("down", key), ("up", key)] * 2)
+    def test_switch_attack_keys_while_walking(self):
+        for action in ("attack", "attack", "aoe", "aoe", "none"):
+            self.tick(f"left none {action}")
+        self.assertEqual(self.events, [("down", "left"), ("down", "x"), ("up", "x"),
+                                       ("down", "a"), ("up", "a")])
+
+    def test_shared_attack_key_is_held_until_exit(self):
+        self.kb.attack_key = self.kb.aoe_key = "s"
+        for action in ("attack", "aoe", "attack", "none", "none", "aoe", "jump"):
+            self.tick(f"none none {action}")
+        self.assertEqual(self.events, [("down", "s"), ("up", "s"), ("down", "s"),
+                                       ("up", "s"), ("down", "alt"), ("up", "alt")])
 
     def test_focus_pause_resume_and_shutdown(self):
         self.tick("right none none")
@@ -168,7 +187,7 @@ class KeyStateTrackerTest(unittest.TestCase):
         self.tick("right none attack")
         self.assertEqual(self.events, [
             ("down", "left"), ("up", "left"), ("down", "right"),
-            ("down", "x"), ("up", "x"),
+            ("down", "x"),
         ])
 
     def test_directinput_failure_does_not_commit_transition(self):

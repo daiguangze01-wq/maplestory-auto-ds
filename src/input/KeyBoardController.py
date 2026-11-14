@@ -9,6 +9,7 @@ Adapted from MapleStoryAutoLevelUp (KenYu910645) for maplestory-auto-ds:
 """
 import threading
 import time
+from contextlib import closing
 
 # Library import
 import pyautogui
@@ -24,6 +25,10 @@ except ImportError:
 from src.utils.logger import logger
 from src.utils.common import is_mac, is_windows
 if is_windows():
+    import win32api
+    import win32con
+    import win32process
+    import win32security
     from src.utils.common import activate_game_window
 
 if is_mac():
@@ -36,6 +41,24 @@ pyautogui.PAUSE = 0  # remove delay
 # movement transition and leave DirectInput in an inconsistent key state.
 _INPUT_LOCK = threading.RLock()
 _PRESSED_KEYS = set()
+
+
+def _integrity_level(process):
+    with closing(win32security.OpenProcessToken(process, win32con.TOKEN_QUERY)) as token:
+        sid, _ = win32security.GetTokenInformation(token, win32security.TokenIntegrityLevel)
+        return sid.GetSubAuthority(sid.GetSubAuthorityCount() - 1)
+
+
+def _game_has_higher_integrity(hwnd):
+    if not hwnd or not is_windows():
+        return False
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        with closing(win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)) as game:
+            return _integrity_level(game) > _integrity_level(win32api.GetCurrentProcess())
+    except win32api.error as exc:
+        logger.warning(f"[Input] Could not compare Windows process integrity: {exc}")
+        return False
 
 
 def _norm_key(key):
@@ -133,13 +156,16 @@ class KeyBoardController():
         self._last_action = None
         self.window_title = cfg["game_window"]["title"]
         self.window_hwnd = window_hwnd
+        self.game_has_higher_integrity = _game_has_higher_integrity(window_hwnd)
+        self.input_status = "Waiting"
+        if self.game_has_higher_integrity:
+            logger.warning("[Input] Game has higher Windows integrity. 请用普通权限启动游戏，"
+                           "或右键 run.bat 选择“以管理员身份运行”。")
         self.fps = 0  # Frame per seconds
 
         # Timers
         self.t_last_run = time.time()
         self.t_last_skill = 0.0  # Last attack/skill time
-        self.t_last_attack = 0.0
-        self.t_last_aoe = 0.0
 
         # Flags
         self.is_enable = True
@@ -169,12 +195,6 @@ class KeyBoardController():
             self.attack_key = cfg["key"]["directional_attack"]
         else:
             raise ValueError(f"Unexpected attack type: {cfg['bot']['attack']}")
-        self.attack_cooldown = max(
-            0.0, float(cfg.get("directional_attack", {}).get("cooldown", 0.9))
-        )
-        self.aoe_cooldown = max(
-            0.0, float(cfg.get("aoe_skill", {}).get("cooldown", 1.0))
-        )
 
         # Periodic loot pickup
         self.pickup_key = cfg["key"].get("pickup", "")
@@ -269,7 +289,7 @@ class KeyBoardController():
         potion and return-home actions can never leak into another application.
         """
         with _INPUT_LOCK:
-            if self.is_terminated or not self.is_enable:
+            if self.is_terminated or not self.is_enable or self.game_has_higher_integrity:
                 return False
             if not self.is_game_window_active():
                 logger.warning(
@@ -287,8 +307,8 @@ class KeyBoardController():
         self.fps = round(1.0 / max(time.time() - self.t_last_run, 0.001))
         self.t_last_run = time.time()
 
-    def _apply_movement(self, move_x, move_y):
-        """Release obsolete keys before establishing either axis of a new hold."""
+    def _apply_holds(self, move_x, move_y, action):
+        """Release obsolete keys, establish movement/facing, then hold the attack key."""
         held = []
         face = None
         if move_x in ("left", "right"):
@@ -302,7 +322,11 @@ class KeyBoardController():
         elif move_y not in ("none", "stop"):
             logger.error(f"[KeyBoardController] Unsupported vertical command: {move_y}")
 
-        for key in sorted(_PRESSED_KEYS.difference(held)):
+        attack = {"attack": self.attack_key, "aoe": self.aoe_key}.get(action)
+        desired = set(held)
+        if attack:
+            desired.add(_norm_key(attack))
+        for key in sorted(_PRESSED_KEYS - desired):
             if not key_up(key):
                 return False
         for key in held:
@@ -312,22 +336,15 @@ class KeyBoardController():
             if face and not press_key(face, duration=0.03):
                 return False
             self._last_face = face
+        if attack is not None:
+            if not self.is_game_window_active() or not key_down(attack):
+                self.input_status = "Attack key not held"
+                return False
+            self.t_last_skill = time.time()
         return True
 
     def _apply_action(self, action):
-        if self.is_need_force_heal:
-            press_key(self.cfg["key"]["add_hp"])
-            self._last_action = None
-            return
-        if action in ("attack", "aoe"):
-            now = time.time()
-            if action == "attack" and now - self.t_last_attack >= self.attack_cooldown:
-                if press_key(self.attack_key):
-                    self.t_last_attack = self.t_last_skill = now
-            elif action == "aoe" and now - self.t_last_aoe >= self.aoe_cooldown:
-                if press_key(self.aoe_key):
-                    self.t_last_aoe = self.t_last_skill = now
-        elif action != self._last_action:
+        if action != self._last_action:
             keys = self.cfg["key"]
             if action in ("double_jump", "double_teleport"):
                 key = keys[action[len("double_"):]]
@@ -341,14 +358,14 @@ class KeyBoardController():
                 duration = 0.08 if action == "jump" else 0.05
                 if not press_key(keys[action], duration):
                     return
-            elif action not in ("goal", "none", "stop"):
+            elif action not in ("goal", "none", "stop", "attack", "aoe"):
                 logger.error(f"[KeyBoardController] Unsupported action command: {action}")
         self._last_action = action
 
     def _pickup(self):
         """Pause horizontal movement for pickup. The next tick restores current intent."""
         with _INPUT_LOCK:
-            for key in ("left", "right"):
+            for key in _PRESSED_KEYS.difference({"up", "down"}):
                 if not key_up(key):
                     return
         for _ in range(self.pickup_taps):
@@ -361,9 +378,19 @@ class KeyBoardController():
     def _tick(self):
         """Apply the latest complete command while input is enabled and focused."""
         with _INPUT_LOCK:
-            if self.is_terminated or not self.is_enable or not self.is_game_window_active():
+            if self.is_terminated or not self.is_enable:
+                self.input_status = "Paused"
                 self.release_all_key()
                 return False
+            if self.game_has_higher_integrity:
+                self.input_status = "Game has higher Windows privileges"
+                self.release_all_key()
+                return False
+            if not self.is_game_window_active():
+                self.input_status = "Waiting for game focus"
+                self.release_all_key()
+                return False
+            self.input_status = "Ready"
 
             for i, buff_key in enumerate(self.buff_keys):
                 cooldown = self.buff_cooldowns[i] if i < len(self.buff_cooldowns) else 60
@@ -379,8 +406,13 @@ class KeyBoardController():
                           and time.time() - self.t_last_pickup >= self.pickup_interval)
             if not pickup_due:
                 move_x, move_y, action = self._command
-                if self._apply_movement(move_x, move_y):
+                if self.is_need_force_heal:
+                    action = "add_hp"
+                    self._last_action = None
+                if self._apply_holds(move_x, move_y, action):
                     self._apply_action(action)
+                elif self.input_status == "Ready":
+                    self.input_status = "Key transition failed"
                 return True
 
         self._pickup()
@@ -393,7 +425,7 @@ class KeyBoardController():
         try:
             while not self.is_terminated:
                 active = self._tick()
-                if not active and self.is_enable and not self.is_terminated:
+                if not active and self.input_status == "Waiting for game focus":
                     # Auto-pull the game window back to the foreground instead of
                     # silently dropping all keys. Throttled to avoid spamming.
                     now = time.time()

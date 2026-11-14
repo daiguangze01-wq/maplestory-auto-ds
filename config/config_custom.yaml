@@ -61,19 +61,20 @@ monster_detect:
   diff_thres: 0.10                  # 幽灵模板匹配阈值（越小越严格）
   scales: [1.0]                     # 模板采自 1280 宽的检测画面
   display_scale: 0.47               # 监视器缩放 0.1~1.0（越小越流畅）
-  detection_interval: 2             # 每N帧检测一次 1~5（1=每帧，越大越流畅）
+  detection_interval: 1             # 每帧更新可攻击目标，目标消失即停手
   with_enemy_hp_bar: false          # 仅按幽灵外观计数
   hp_bar_color: [0, 255, 0]         # 怪物血条 BGR 颜色（绿色）
   hp_bar_tolerance: 30              # 颜色容差（实际是0,243,0，容差30能匹配到）
 
 directional_attack:
+  range_x: 250                     # 左右各 250，攻击框总宽 500（1280 宽检测画面）
+  range_y: 150                     # 上下各 150，攻击框总高 300
   attack_in_place: true            # 原地攻击：不移动持续攻击（刷固定点用）
   aoe_monster_count: 3             # 识别怪物>=此数量时使用群攻
   in_place_walk_interval: 300      # 原地攻击时每隔多少帧左右走动一次（防攻击失效）
   in_place_walk_frames: 4         # 单方向走多少帧（走动幅度）
   in_place_stop_attack_frames: 8  # 移动前先停攻击多少帧（约0.5s@15fps）
   in_place_walk_dir: "alternate"   # alternate=左右交替 / left / right
-  search_attack_while_move: false   # 找怪时不攻击，避免停步
   search_flip_frames: 4800            # 每方向走480帧（约16秒@30fps）
   search_max_offset_px: 10000          # 单边最远走600px（翻倍）
   search_stall_frames: 0             # 0=关闭stall检测（无路线时小地图动太慢会误判卡住）
