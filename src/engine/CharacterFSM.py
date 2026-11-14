@@ -47,6 +47,7 @@ class Perception:
     route_cmd: Tuple[str, str, str] = _ROUTE_NONE
     progress_x: Optional[float] = None    # 稳定的水平位移基准（小地图/全局坐标）
     progress_src: str = "none"            # global / minimap / none
+    single_platform: bool = False         # Assigned platform, stationary team hunting
 
 
 @dataclass(frozen=True)
@@ -142,7 +143,18 @@ class CharacterFSM:
             action = route_action
 
         # ② 按优先级覆盖
-        if p.mode == "hunt" and p.attack_in_place:
+        if p.single_platform:
+            # Turning to attack is allowed. Suppress periodic walks, route
+            # commands and searching so a ledge near its edge stays occupied.
+            active = p.mode == "hunt" and p.monster_count > 0
+            move_x = (f"face_{p.facing}" if active and p.facing in ("left", "right")
+                      and p.attack_style == "directional" else "none")
+            move_y, action = "none", "none"
+            if active:
+                threshold = self.cfg.get("directional_attack", {}).get("aoe_monster_count", 3)
+                action = "aoe" if p.monster_count >= threshold else "attack"
+            new_state = STATE_COMBAT_IN_PLACE if active else STATE_IDLE
+        elif p.mode == "hunt" and p.attack_in_place:
             self._reset_hunt_search_state()
             move_x, move_y, action = self._in_place_command(p)
             new_state = STATE_COMBAT_IN_PLACE

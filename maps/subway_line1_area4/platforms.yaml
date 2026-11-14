@@ -1,0 +1,39 @@
+# 1280px working image, coordinates in the first surveyed view.
+reference: ../../docs/assets/ghost-platforms.jpg
+width: 1280
+feet_offset: [0, 30]
+# Map name on the fixed minimap header. Camera registration uses scenery only.
+map_label: [45, 27, 160, 57]
+anchors:
+  - [356, 373, 490, 402]
+  - [526, 434, 615, 480]
+  - [692, 317, 774, 365]
+  - [938, 430, 994, 479]
+  - [595, 546, 645, 589]
+  - [1116, 202, 1163, 245]
+  - [358, 195, 417, 246]
+# x start, x end, standing y. Split the upper walkway at its gap.
+platforms:
+  upper_left: [360, 905, 210]
+  upper_right: [1120, 1279, 210]
+  middle: [695, 1279, 322]
+  ledge: [360, 487, 380]
+  lower: [528, 1074, 435]
+  ground: [215, 1279, 553]
+# Each connector is a one-way candidate until its landing is observed in game.
+connections:
+  - {kind: climb, x: 430, from: ledge, to: upper_left, verified: false}
+  - {kind: climb, x: 430, from: ground, to: ledge, verified: false}
+  - {kind: climb, x: 740, from: lower, to: middle, verified: false}
+  - {kind: climb, x: 865, from: middle, to: upper_left, verified: false}
+  - {kind: climb, x: 958, from: ground, to: lower, verified: false}
+  - {kind: drop, x: 462, from: ledge, to: ground, verified: false}
+  - {kind: drop, x: 803, from: middle, to: lower, verified: false}
+  - {kind: drop, x: 640, from: lower, to: ground, verified: false}
+# Fixed HUD rectangles in the reference client. The bottom bar is anchored
+# to the client bottom on live frames; the reference image is cropped at y=650.
+playfield_bottom: 650
+hud:
+  - [0, 0, 243, 155]
+  - [1090, 0, 1280, 53]
+  - [1130, 574, 1280, 650]

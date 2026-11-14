@@ -161,6 +161,35 @@ class KeyStateTrackerTest(unittest.TestCase):
         self.assertEqual(self.events, [("down", "s"), ("up", "s"), ("down", "s"),
                                        ("up", "s"), ("down", "alt"), ("up", "alt")])
 
+    def test_jump_attack_taps_in_order_and_shares_cooldown(self):
+        self.kb.jump_attack = True
+        self.kb.cfg["key"]["jump"] = "c"
+        self.kb.attack_key = self.kb.aoe_key = "s"
+        with patch.object(kbc.time, "monotonic", side_effect=[1, 1.1, 1.7]):
+            self.tick("none none attack")
+            self.tick("none none aoe")
+            self.tick("none none aoe")
+            self.tick("none none none")
+        self.assertEqual(self.events, [("down", "c"), ("up", "c"), ("down", "s"), ("up", "s")] * 2)
+        self.assertEqual(self.kb.pressed_keys(), [])
+
+    def test_jump_attack_stops_if_target_lost_during_jump(self):
+        self.kb.jump_attack = True
+        self.kb.cfg["key"]["jump"] = "c"
+        with patch.object(kbc.time, "sleep", side_effect=lambda _: self.kb.set_command("none none none")):
+            self.tick("none none attack")
+        self.assertEqual(self.events, [("down", "c"), ("up", "c")])
+
+    def test_attack_restarts_after_turn_but_not_for_same_facing_or_deadzone(self):
+        self.kb.attack_key = self.kb.aoe_key = "s"
+        for cmd in ("face_right none attack", "none none attack", "face_right none aoe",
+                    "face_left none aoe", "face_left none attack", "none none none"):
+            self.tick(cmd)
+        self.assertEqual(self.events, [
+            ("down", "right"), ("up", "right"), ("down", "s"),
+            ("up", "s"), ("down", "left"), ("up", "left"), ("down", "s"), ("up", "s"),
+        ])
+
     def test_focus_pause_resume_and_shutdown(self):
         self.tick("right none none")
         self.kb.is_game_window_active = lambda: False

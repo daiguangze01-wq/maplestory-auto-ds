@@ -1,5 +1,7 @@
 bot:
   mode: "hunt" # detect = 只检测不攻击, hunt
+  jump_attack: true
+  jump_attack_interval: 0.65   # 两次起跳之间的最短秒数
   attack: "directional"
   map: "north_forest_2"
   enable_route: false
@@ -10,7 +12,10 @@ system:
 game_window:
   working_width: 1280         # 客户区等比缩放至此宽度，供识别和预览使用
 
+platform_profile: "maps/subway_line1_area4/platforms.yaml"
+
 key:
+  jump: "c"
   directional_attack: "s"
   aoe_skill: "s"
   add_hp: "end"
@@ -18,6 +23,7 @@ key:
 
 title:
   template: "character/medal_green.png"
+  confirm_unique_color: true    # 画面边缘也可按勋章的形状和颜色确认唯一候选
   enable: true
   mode: "grayscale"           # 当前这张 title.png 建议先用 grayscale；如果现场干扰多再切 white_mask
   manual_select: true          # 在监视器窗口里点击称号候选框，手动锁定自己的角色

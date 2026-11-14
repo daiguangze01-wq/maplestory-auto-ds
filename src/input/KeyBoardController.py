@@ -154,6 +154,9 @@ class KeyBoardController():
         self._command = ("none", "none", "none")
         self._last_face = None
         self._last_action = None
+        self.jump_attack = cfg["bot"].get("jump_attack", False)
+        self.jump_attack_interval = float(cfg["bot"].get("jump_attack_interval", 0.65))
+        self._next_jump_attack = 0.0
         self.window_title = cfg["game_window"]["title"]
         self.window_hwnd = window_hwnd
         self.game_has_higher_integrity = _game_has_higher_integrity(window_hwnd)
@@ -324,19 +327,25 @@ class KeyBoardController():
 
         attack = {"attack": self.attack_key, "aoe": self.aoe_key}.get(action)
         desired = set(held)
-        if attack:
+        if attack and not self.jump_attack:
             desired.add(_norm_key(attack))
+            if face and face != self._last_face:
+                # Turning can interrupt the skill. Finish the turn before
+                # starting a new attack hold even when both skills share S.
+                desired.discard(_norm_key(attack))
         for key in sorted(_PRESSED_KEYS - desired):
             if not key_up(key):
                 return False
         for key in held:
             if not key_down(key):
                 return False
-        if face != self._last_face:
-            if face and not press_key(face, duration=0.03):
+        if face:
+            if face != self._last_face and not press_key(face, duration=0.03):
                 return False
             self._last_face = face
-        if attack is not None:
+        elif not attack or move_x in ("left", "right"):
+            self._last_face = None
+        if attack is not None and not self.jump_attack:
             if not self.is_game_window_active() or not key_down(attack):
                 self.input_status = "Attack key not held"
                 return False
@@ -344,6 +353,19 @@ class KeyBoardController():
         return True
 
     def _apply_action(self, action):
+        if self.jump_attack and action in ("attack", "aoe"):
+            now = time.monotonic()
+            if now >= self._next_jump_attack:
+                self._next_jump_attack = now + self.jump_attack_interval
+                if self.press_key_safe(self.cfg["key"]["jump"], 0.08, "jump attack"):
+                    # The detector can withdraw the attack while C is down.
+                    current = self._command[2]
+                    if current in ("attack", "aoe"):
+                        key = self.attack_key if current == "attack" else self.aoe_key
+                        if self.press_key_safe(key, 0.06, "airborne attack"):
+                            self.t_last_skill = time.time()
+            self._last_action = action
+            return
         if action != self._last_action:
             keys = self.cfg["key"]
             if action in ("double_jump", "double_teleport"):

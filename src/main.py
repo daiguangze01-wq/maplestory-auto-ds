@@ -41,6 +41,10 @@ def main():
                         help="Enable debug logging")
     parser.add_argument("--disable_viz", action="store_true",
                         help="Disable the debug visualization window")
+    parser.add_argument("--observe", action="store_true",
+                        help="Preview platform and ghost detection without keyboard control")
+    parser.add_argument("--single-platform", action="store_true",
+                        help="Hunt only on the first recognized platform this session")
     args = parser.parse_args()
 
     if args.debug:
@@ -78,6 +82,12 @@ def main():
     if args.disable_viz:
         cfg["disable_viz"] = True
         logger.info("  Debug visualization: disabled")
+    cfg["observe"] = args.observe
+    cfg["single_platform"] = args.single_platform
+    if args.observe or args.single_platform:
+        cfg["bot"]["enable_route"] = False
+    if args.observe:
+        cfg["bot"]["mode"] = "detect"
 
     # -------------------------------------------------------------------
     # Initialize the monster detector
@@ -96,14 +106,17 @@ def main():
         detector.load_map_and_routes(cfg["bot"]["map"])
 
     # Create keyboard controller for movement + listener for F1 toggle
-    from src.input.KeyBoardController import KeyBoardController
-    from src.input.KeyBoardListener import KeyBoardListener
     logger.info("Starting game window capture...")
     detector.start_capture()
-    kb = KeyBoardController(cfg, window_hwnd=detector.capture.hwnd)
-    detector._kb = kb  # Wire to detector
-    kb_listener = KeyBoardListener(cfg, is_autobot=True)
-    kb_listener.register_func_key_handler('f1', kb.toggle)
+    kb = kb_listener = None
+    if not args.observe:
+        from src.input.KeyBoardController import KeyBoardController
+        from src.input.KeyBoardListener import KeyBoardListener
+        kb = KeyBoardController(cfg, window_hwnd=detector.capture.hwnd)
+        detector._kb = kb
+        kb_listener = KeyBoardListener(cfg, is_autobot=True)
+        kb_listener.register_func_key_handler('f1', kb.toggle)
+        kb_listener.register_func_key_handler('f11', detector.toggle_mode)
 
     # -------------------------------------------------------------------
     # Start processing in background thread (matches reference: thread_auto_bot)
@@ -111,7 +124,7 @@ def main():
     detector.start()
 
     # Register HP/MP toggle hotkeys (after HealthMonitor is created)
-    if detector.health_monitor is not None:
+    if kb_listener and detector.health_monitor is not None:
         kb_listener.register_func_key_handler(
             'f2', detector.health_monitor.toggle_hp
         )
@@ -119,16 +132,13 @@ def main():
             'f3', detector.health_monitor.toggle_mp
         )
 
-    # Register F11 to toggle bot mode (detect <-> hunt)
-    kb_listener.register_func_key_handler('f11', detector.toggle_mode)
-
     # -------------------------------------------------------------------
     # Main thread: display loop (matches reference: main() while loop)
     # Processing runs in background, display never blocks.
     # -------------------------------------------------------------------
     win_name = "NewMaple"
     window_positioned = False
-    last_frame_seq = -1
+    last_displayed = None
     t_last_display = time.time()
 
     cv2.namedWindow(win_name)
@@ -143,40 +153,39 @@ def main():
 
     try:
         while not detector.is_terminated:
-            # Show debug image — only when a new frame is ready
-            # (exact same pattern as reference: MapleStoryAutoLevelUp.py:1851-1864)
-            if detector.is_frame_done and detector.frame_seq != last_frame_seq:
-                if detector.img_display is not None:
-                    cv2.imshow(win_name, detector.img_display)
-                    now = time.time()
-                    detector.display_fps = round(1.0 / max(now - t_last_display, 0.001))
-                    t_last_display = now
-                    last_frame_seq = detector.frame_seq
+            # Each published image remains available while the next frame is processed.
+            frame = detector.img_display
+            if frame is not None and frame is not last_displayed:
+                cv2.imshow(win_name, frame)
+                now = time.time()
+                detector.display_fps = round(1.0 / max(now - t_last_display, 0.001))
+                t_last_display = now
+                last_displayed = frame
 
-                    if not window_positioned:
-                        try:
-                            import ctypes
-                            user32 = ctypes.windll.user32
-                            get_system_metrics = getattr(user32, "GetSystemMetrics")
-                            screen_w = get_system_metrics(0)
-                            screen_h = get_system_metrics(1)
-                            rect = cv2.getWindowImageRect(win_name)
-                            if rect:
-                                _, _, win_w, win_h = rect
-                                cv2.moveWindow(win_name,
-                                               screen_w - win_w - 20,
-                                               screen_h - win_h - 100)
-                                window_positioned = True
-                        except Exception:
-                            pass
+                if not window_positioned:
+                    try:
+                        import ctypes
+                        user32 = ctypes.windll.user32
+                        get_system_metrics = getattr(user32, "GetSystemMetrics")
+                        screen_w = get_system_metrics(0)
+                        screen_h = get_system_metrics(1)
+                        rect = cv2.getWindowImageRect(win_name)
+                        if rect:
+                            _, _, win_w, win_h = rect
+                            cv2.moveWindow(win_name,
+                                           screen_w - win_w - 20,
+                                           screen_h - win_h - 100)
+                            window_positioned = True
+                    except Exception:
+                        pass
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q') or key == 27:
                 logger.info("Quit key pressed.")
                 detector.is_terminated = True
-            elif key == ord('s'):
+            elif key == ord('s') and last_displayed is not None:
                 from src.utils.common import screenshot
-                screenshot(detector.img_display, "detection")
+                screenshot(last_displayed, "detection")
                 logger.info("Screenshot saved.")
             elif key == ord('c'):
                 detector.clear_title_selection()
@@ -190,9 +199,11 @@ def main():
         import traceback
         traceback.print_exc()
     finally:
+        if kb:
+            kb.stop()
+        if kb_listener:
+            kb_listener.stop()
         detector.cleanup()
-        kb.stop()
-        kb_listener.stop()
 
     logger.info("Done.")
 

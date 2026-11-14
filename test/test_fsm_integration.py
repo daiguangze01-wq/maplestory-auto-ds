@@ -118,7 +118,6 @@ class FsmIntegrationTest(unittest.TestCase):
     def test_attack_stops_when_last_target_leaves_skill_rectangle(self):
         cfg = _load_cfg()
         cfg["title"]["enable"] = False
-        cfg["directional_attack"].update(range_x=250, range_y=150)
         detector = MonsterDetector(cfg, test_image=self.tmp)
         detector.is_show_debug = False
         detector._kb = _KBStub()
@@ -126,13 +125,16 @@ class FsmIntegrationTest(unittest.TestCase):
         inside = {"name": "ghost", "position": (640, 440), "size": (20, 20)}
         outside_x = dict(inside, position=(641, 440))
         outside_y = dict(inside, position=(640, 441))
+        upper_edge = dict(inside, position=(390, 140))
+        above_edge = dict(inside, position=(390, 139))
         detector.get_monsters_in_range = Mock(side_effect=[
-            [inside, outside_x, outside_y], [outside_x, outside_y], [],
+            [inside, outside_x, outside_y], [outside_x, outside_y], [], [upper_edge], [above_edge],
         ])
-        for _ in range(3):
+        for _ in range(5):
             self.assertEqual(detector.run_once(), 0)
         self.assertEqual(detector._kb.commands, [
             "face_right none attack", "none none none", "none none none",
+            "none none attack", "none none none",
         ])
 
 

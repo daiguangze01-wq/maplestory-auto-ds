@@ -30,6 +30,7 @@ from src.utils.common import (
 from src.input.GameWindowCapturor import GameWindowCapturor
 from src.engine.CharacterFSM import CharacterFSM, Perception
 from src.engine.HealthMonitor import HealthMonitor
+from src.engine.PlatformSurvey import PlatformSurvey
 
 
 class MonsterDetector:
@@ -58,6 +59,11 @@ class MonsterDetector:
         self.monsters_info: dict = {}   # {name: [(img, mask), ...]}
         self.monsters: list = []        # Detected monsters in current frame
         self.attack_targets = []
+        self.survey = None
+        self.visible_ghosts = []
+        self.platform_offset = None
+        self.player_feet = None
+        self.locked_platform = None
 
         # Frame data
         self.frame = None               # Raw captured frame
@@ -105,6 +111,7 @@ class MonsterDetector:
         self.img_title = None
         self.img_title_gray = None
         self.title_mask = None
+        self.title_color_pixels = None
         title_path = cfg.get("title", {}).get("template", "character/title.png")
         if os.path.exists(title_path):
             self.img_title = load_image(title_path, cv2.IMREAD_UNCHANGED)
@@ -114,6 +121,16 @@ class MonsterDetector:
                     self.title_mask = np.ascontiguousarray(alpha)
             self.img_title_gray = (self.img_title if self.img_title.ndim == 2 else
                                    cv2.cvtColor(self.img_title, cv2.COLOR_BGR2GRAY))
+            if cfg.get("title", {}).get("confirm_unique_color") and self.img_title.ndim == 3:
+                colors = self.img_title[:, :, :3].astype(np.float32)
+                pixels = np.ptp(colors, axis=2) > 25
+                if self.title_mask is not None:
+                    pixels &= self.title_mask > 128
+                if np.count_nonzero(pixels) >= 32:
+                    self.title_color_pixels = pixels
+                    color = colors[pixels]
+                    self.title_chroma = color - color.mean(axis=1, keepdims=True)
+                    self.title_chroma_power = np.sum(self.title_chroma ** 2, axis=1)
             logger.info(f"  Loaded title template: {title_path} {self.img_title.shape[1]}x{self.img_title.shape[0]}")
         else:
             logger.warning(f"  Missing player title template: {title_path}")
@@ -123,12 +140,10 @@ class MonsterDetector:
         self.frame_count = 0
         self.fps = 0
         self.display_fps = 0
-        self.frame_seq = 0
         self.best_score = 1.0       # Best (lowest) match score this frame
 
         # Flags
         self.is_terminated = False
-        self.is_frame_done = False
         self.is_show_debug = not cfg.get("disable_viz", False)
 
         # Capture thread
@@ -212,6 +227,13 @@ class MonsterDetector:
             return False
 
         logger.info(f"Total monsters loaded: {list(self.monsters_info.keys())}")
+        if self.cfg.get("observe") or self.cfg.get("single_platform"):
+            profile = self.cfg.get("platform_profile")
+            if not profile or not self.monsters_info.get("ghost"):
+                logger.error("Platform modes require platform_profile and ghost templates.")
+                return False
+            self.survey = PlatformSurvey(profile, self.monsters_info["ghost"],
+                                         self.cfg["monster_detect"]["diff_thres"])
         return True
 
     def _load_monster_template(self, file: str) -> tuple:
@@ -712,6 +734,8 @@ class MonsterDetector:
                 cv2.LINE_AA,
             )
 
+        if self.survey:
+            return  # Reserve the header for platform and target information.
         status = f"TitleSel: {'LOCKED' if locked else 'AUTO'} | LClick select | RClick/C clear | miss={miss_count}"
         cv2.putText(
             self.img_frame_debug,
@@ -723,6 +747,17 @@ class MonsterDetector:
             2,
             cv2.LINE_AA,
         )
+
+    def _title_color_matches(self, loc):
+        """Confirm that the opaque colored markings also occur in the live crop."""
+        if self.title_color_pixels is None:
+            return False
+        h, w = self.title_color_pixels.shape
+        x, y = loc
+        sample = self.img_frame[y:y+h, x:x+w][self.title_color_pixels].astype(np.float32)
+        chroma = sample - sample.mean(axis=1, keepdims=True)
+        agreement = np.sum(chroma * self.title_chroma, axis=1) > 0.45 * self.title_chroma_power
+        return np.mean(agreement) >= 0.8
 
     def _detect_player_by_title(self):
         """Detect player location by matching the title template (at character feet)."""
@@ -960,6 +995,16 @@ class MonsterDetector:
                     global_cand["jump_px"] = 0.0
                     candidates.append(global_cand)
 
+            # A unique shape AND color match can lie outside the center
+            # search on map edges. During tracking keep the displacement guard.
+            if not manual_locked and len(candidate_pool) == 1:
+                candidate = candidate_pool[0]
+                near_lock = not had_lock or np.hypot(
+                    candidate["loc"][0] - self.loc_title[0],
+                    candidate["loc"][1] - self.loc_title[1]) <= max_jump_px
+                if near_lock and self._title_color_matches(candidate["loc"]):
+                    candidates = [dict(candidate, src="unique_color")]
+
             if not manual_locked and not candidates:
                 self._fallback_player_location()
                 return
@@ -974,7 +1019,7 @@ class MonsterDetector:
 
                     strong_global = (src == "global" and not had_lock
                                      and cand["score"] < strong_match_threshold)
-                    if src != "prev" and not strong_global and center_dist_px > center_accept_radius:
+                    if src not in ("prev", "unique_color") and not strong_global and center_dist_px > center_accept_radius:
                         rejected.append((src, "far_from_center", round(center_dist_px, 1), round(cand["score"], 4)))
                         continue
                     if had_lock and src != "prev" and jump_px > max_jump_px:
@@ -1027,17 +1072,18 @@ class MonsterDetector:
             self._fallback_player_location()
             return
 
+        threshold = candidate_threshold if match_src == "unique_color" else match_threshold
         # Log score every frame for first 100 frames, then every 30 frames
         if self.frame_count <= 100 or self.frame_count % 30 == 0:
-            status = "HIT" if (score < match_threshold or match_src in ("manual", "manual_hold", "prev_keep")) else "MISS"
+            status = "HIT" if (score < threshold or match_src in ("manual", "manual_hold", "prev_keep")) else "MISS"
             logger.info(
                 f"[Title] frame={self.frame_count} score={score:.4f} "
-                f"thresh={match_threshold:.2f} {status} src={match_src} mode={mode}"
+                f"thresh={threshold:.3f} {status} src={match_src} mode={mode}"
             )
             if 'rejected' in locals() and rejected:
                 logger.info(f"[Title] Rejected candidates: {rejected[:3]}")
 
-        if score < match_threshold or match_src in ("prev_keep", "manual", "manual_hold"):
+        if score < threshold or match_src in ("prev_keep", "manual", "manual_hold"):
             observed = match_src not in ("prev_keep", "manual_hold")
             # Anti-jump guard: reject sudden large jumps unless score is very confident.
             if self.loc_title is not None and match_src not in ("prev_keep", "manual_hold"):
@@ -1334,6 +1380,13 @@ class MonsterDetector:
     def _update_debug_overlay(self):
         """Add FPS, HP/MP/EXP, and status info to the debug frame."""
 
+        if self.survey:
+            self._draw_title_candidates()
+            input_status = self._kb.input_status if self._kb else "Observe only"
+            cv2.putText(self.img_frame_debug, f"{input_status} | Q quit", (10, self.img_frame.shape[0]-12),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2, cv2.LINE_AA)
+            return
+
         # --- HP / MP / EXP display (top-right) ---
         if self.health_monitor is not None:
             hm = self.health_monitor
@@ -1466,11 +1519,12 @@ class MonsterDetector:
             0 on success, -1 if frame capture failed.
         """
         self.frame_count += 1
-        self.is_frame_done = False
 
         # Capture frame
         self.img_frame = self.get_img_frame()
         if self.img_frame is None:
+            self.visible_ghosts = []
+            self.player_feet = self.platform_offset = self.loc_player_minimap = None
             if self._kb:
                 self._kb.set_command("stop stop stop")
             if self.health_monitor:
@@ -1498,6 +1552,7 @@ class MonsterDetector:
         # Detect minimap (adapted for MapleStoryGo: bright fill + dark borders)
         minimap_result = self._detect_minimap()
         self.img_minimap = None
+        self.loc_player_minimap = None
         if minimap_result:
             x, y, w, h = minimap_result
             fh, fw = self.img_frame.shape[:2]
@@ -1561,6 +1616,11 @@ class MonsterDetector:
 
             self.update_cmd_by_route()
 
+        # Start a fresh canvas before any detector can draw on it. At display
+        # scale 1 the previous canvas may still be on the UI thread.
+        if self.is_show_debug:
+            self.img_frame_debug = self.img_frame.copy()
+
         # Detect player via title template matching
         self._detect_player_by_title()
 
@@ -1572,22 +1632,29 @@ class MonsterDetector:
         else:
             reach_x = self.cfg["directional_attack"]["range_x"]
             reach_y = self.cfg["directional_attack"]["range_y"]
-        dx, dy = reach_x + margin, reach_y + margin
-
-        x0 = max(0, self.loc_player[0] - dx)
-        x1 = min(self.img_frame.shape[1], self.loc_player[0] + dx)
-        y0 = max(0, self.loc_player[1] - dy)
-        y1 = min(self.img_frame.shape[0], self.loc_player[1] + dy)
-
-        # Prepare debug frame
-        if self.is_show_debug:
-            self.img_frame_debug = self.img_frame.copy()
+        px, py = self.loc_player
+        top = py - reach_y
+        bottom = py + reach_y
+        x0 = max(0, px - reach_x - margin)
+        x1 = min(self.img_frame.shape[1], px + reach_x + margin)
+        y0 = max(0, top - margin)
+        y1 = min(self.img_frame.shape[0], bottom + margin)
 
         # ---------------------------------------------------------------
         # Monster detection — frame skipping for performance
         # ---------------------------------------------------------------
         interval = self.cfg["monster_detect"].get("detection_interval", 2)
-        if self.frame_count % interval == 0:
+        if self.survey:
+            self.platform_offset = self.survey.register(self.img_frame_gray)
+            seen = self._title_last_seen_frame == self.frame_count
+            self.player_feet = self.survey.feet(self.loc_player if seen else None)
+            self.visible_ghosts = self.survey.scan(self.img_frame, self.img_frame_gray)
+            # One scan per captured frame. Combat and the overlay use the same
+            # observations, never a far-field box cached before a camera pan.
+            self.monsters = [m for m in self.visible_ghosts
+                             if x0 <= m["position"][0] + m["size"][1] // 2 <= x1
+                             and y0 <= m["position"][1] + m["size"][0] // 2 <= y1]
+        elif self.frame_count % interval == 0:
             # Detect monsters on this frame
             self.monsters = self.get_monsters_in_range((x0, y0), (x1, y1))
 
@@ -1597,14 +1664,21 @@ class MonsterDetector:
                     f"Detected {len(self.monsters)} monsters: {names}"
                 )
 
-        px, py = self.loc_player
         self.attack_targets = [
             m for m in self.monsters
             if abs(m["position"][0] + m["size"][1] // 2 - px) <= reach_x
-            and abs(m["position"][1] + m["size"][0] // 2 - py) <= reach_y
+            and top <= m["position"][1] + m["size"][0] // 2 <= bottom
         ]
         if self.cfg.get("title", {}).get("enable", True) and self._title_last_seen_frame != self.frame_count:
             self.attack_targets = []
+        single_platform = self.cfg.get("single_platform", False)
+        if single_platform:
+            floor = self.survey.platform_at(self.player_feet, self.platform_offset)
+            if floor and self.locked_platform is None:
+                self.locked_platform = floor
+                logger.info(f"[Hunt] Locked platform: {floor}")
+            self.attack_targets = [m for m in self.attack_targets if floor and floor == self.locked_platform
+                                   and self.survey.monster_platform(m, self.platform_offset) == floor]
         progress_x, progress_src = self._get_hunt_search_progress_x()
         perception = Perception(
             mode=self.cfg["bot"].get("mode", "detect"),
@@ -1618,6 +1692,7 @@ class MonsterDetector:
             route_cmd=(self.cmd_move_x, self.cmd_move_y, self.cmd_action),
             progress_x=progress_x,
             progress_src=progress_src,
+            single_platform=single_platform,
         )
         command = self.fsm.tick(perception)
         if self._kb:
@@ -1633,10 +1708,11 @@ class MonsterDetector:
         # Always draw decorations on debug frame
         if self.is_show_debug:
             self._update_debug_overlay()        # Text first (bottom layer)
-            self._draw_search_region(x0, y0, x1, y1)  # Search border
-            if perception.mode == "hunt":
-                cv2.rectangle(self.img_frame_debug, (px - reach_x, py - reach_y),
-                              (px + reach_x, py + reach_y), (0, 165, 255), 2)
+            if not self.survey:
+                self._draw_search_region(x0, y0, x1, y1)
+            if (perception.mode == "hunt" or self.survey) and (not self.survey or self.player_feet):
+                cv2.rectangle(self.img_frame_debug, (px - reach_x, top),
+                              (px + reach_x, bottom), (0, 165, 255), 2)
             # Draw minimap rectangle (matches reference project)
             if self.img_minimap is not None:
                 draw_rectangle(
@@ -1686,7 +1762,7 @@ class MonsterDetector:
                                   (px_paste + cw, py_paste + ch), (255, 255, 255), 2)
 
             self._draw_player_marker()          # Player dot
-            for monster in self.monsters:       # Monster boxes (top layer)
+            for monster in ([] if self.survey else self.monsters):
                 color = (0, 255, 255) if monster["name"] == "Health Bar" else (0, 255, 0)
                 draw_rectangle(
                     self.img_frame_debug,
@@ -1695,6 +1771,13 @@ class MonsterDetector:
                     f"{monster['name']}:{monster['score']:.2f}",
                     thickness=2, text_height=0.5
                 )
+
+            if self.survey:
+                status = (f"Locked {self.locked_platform or '?'}" if single_platform else "Observe")
+                if self.platform_offset is None:
+                    status += " / unmapped"
+                self.survey.draw(self.img_frame_debug, self.platform_offset, self.player_feet,
+                                 self.visible_ghosts, len(self.attack_targets), status, not single_platform)
 
         # Pre-scale display frame in background thread
             scale = self.cfg["monster_detect"].get("display_scale", 0.55)
@@ -1707,10 +1790,6 @@ class MonsterDetector:
             else:
                 self.img_display = self.img_frame_debug
 
-            # Signal a new renderable frame for the UI thread.
-            self.frame_seq += 1
-
-        self.is_frame_done = True
         return 0
 
     def toggle_mode(self):
@@ -1742,7 +1821,7 @@ class MonsterDetector:
         Display is handled by the main thread in main.py.
         Matches reference: MapleStoryAutoBot.loop()
         """
-        if is_windows() and self.capture and not self.test_image:
+        if is_windows() and self.capture and not self.test_image and not self.cfg.get("observe"):
             activate_game_window(self.capture.window_title)
 
         logger.info("[MonsterDetector] Processing loop started...")
@@ -1775,6 +1854,10 @@ class MonsterDetector:
     def cleanup(self):
         """Clean up resources."""
         logger.info("[MonsterDetector] Cleaning up...")
+        self.is_terminated = True
+        worker = getattr(self, "_thread", None)
+        if worker and worker is not threading.current_thread():
+            worker.join()
         if self.health_monitor:
             self.health_monitor.stop()
         if self.capture:
