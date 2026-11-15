@@ -276,19 +276,22 @@ class PlatformSurveyTest(unittest.TestCase):
         d.load_monster_images()
         d.get_img_frame = Mock(return_value=self.frame)
         d._kb = Mock(input_status="Ready")
-        x = 912  # Still approaching the ladder at x=962.
+        x = 860  # Outside the side-jump range of the ladder at x=962.
         def locate():
             d.loc_player = (x, 523)
             d._title_last_seen_frame = d.frame_count
         found = [dict(position=(800, 385), size=(40, 40)), dict(position=(260, 510), size=(40, 40))]
         with patch.object(d, "_detect_player_by_title", side_effect=locate), patch.object(
                 d.survey, "scan", return_value=found), patch(
-                    "src.engine.MonsterDetector.time.monotonic", side_effect=[i / 5 for i in range(20)]):
+                    "src.engine.MonsterDetector.time.monotonic") as clock:
+            clock.return_value = 0
             d.run_once()
             self.assertEqual(d._kb.set_command.call_args.args, ("left none none",))
             found.pop()
+            clock.return_value = 0.1
             d.run_once()
             self.assertEqual(d.fsm.state, "IDLE")
+            clock.return_value = 1.31
             d.run_once()
             self.assertEqual(d.fsm.state, "WALK_TO_LADDER")
             found.append(dict(position=(950, 510), size=(40, 40)))
@@ -296,9 +299,27 @@ class PlatformSurveyTest(unittest.TestCase):
             self.assertEqual(d.fsm.state, "COMBAT_IN_PLACE")
             self.assertIsNone(d.ladder_nav.edge)
             found.pop()
+            clock.return_value = 1.4
             d.run_once()
             self.assertEqual(d.fsm.state, "IDLE")
             x = 962
+            # Several full scans miss the ground ghost while the upper ghost is visible.
+            for timestamp in (1.5, 1.8, 2.4):
+                clock.return_value = timestamp
+                d.run_once()
+                self.assertEqual(d.scan_scope, "full")
+                self.assertEqual(d._kb.set_command.call_args.args, ("none none none",))
+            found.append(dict(position=(950, 510), size=(40, 40)))
+            d.run_once()
+            self.assertEqual(d.fsm.state, "COMBAT_IN_PLACE")
+            found.pop()
+            d.frame_time = 2.5
+            clock.return_value = 2.5
+            d.run_once()
+            clock.return_value = 4.0  # Reprocessing the same capture cannot clear the floor.
+            d.run_once()
+            self.assertIsNone(d.ladder_nav.edge)
+            d.frame_time = 4.0
             d.run_once()
             self.assertEqual(d.fsm.state, "CLIMB")
             d.run_once()
@@ -347,16 +368,20 @@ class PlatformSurveyTest(unittest.TestCase):
         def on_ground():
             d.loc_player = (700, 523)
             d._title_last_seen_frame = d.frame_count
-        ghosts = [dict(position=(710,370),size=(50,40)), dict(position=(610,590),size=(50,40)),
+        ghosts = [dict(position=(710,370),size=(50,40)), dict(position=(610,558),size=(50,40)),
                   dict(position=(800,625),size=(40,40))]
         with patch.object(d, "_detect_player_by_title", side_effect=on_ground), patch.object(
-                d.survey, "scan", return_value=ghosts):
+                d.survey, "scan", return_value=ghosts), patch(
+                    "src.engine.MonsterDetector.time.monotonic") as clock:
+            clock.return_value = 0
             d.run_once()
             self.assertTrue(d.attack_targets)
             self.assertEqual(d.fsm.state, "COMBAT_IN_PLACE")
             ghosts.pop(1)
+            clock.return_value = 0.1
             d.run_once()
             self.assertEqual(d.fsm.state, "IDLE")
+            clock.return_value = 1.31
             d.run_once()
             self.assertEqual(d.ladder_nav.target_floor, "lower")
             self.assertEqual(d.fsm.state, "WALK_TO_LADDER")

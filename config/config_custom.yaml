@@ -71,6 +71,7 @@ monster_detect:
   scales: [1.0]                     # GMS v83 大幽灵素材已按 1280 宽检测画面缩放至原图的 93.75%
   display_scale: 0.47               # 监视器缩放 0.1~1.0（越小越流畅）
   detection_interval: 1             # 每帧更新可攻击目标，目标消失即停手
+  floor_clear_seconds: 1.2          # 当前平台有过目标后，全屏持续扫空这么久才换层
   with_enemy_hp_bar: false          # 仅按幽灵外观计数
   hp_bar_color: [0, 255, 0]         # 怪物血条 BGR 颜色（绿色）
   hp_bar_tolerance: 30              # 颜色容差（实际是0,243,0，容差30能匹配到）

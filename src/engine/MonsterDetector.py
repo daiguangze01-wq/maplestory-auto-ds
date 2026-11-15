@@ -70,6 +70,8 @@ class MonsterDetector:
         self.player_feet = None
         self.locked_platform = None
         self.floor_pending_clear = None
+        self.floor_empty_since = None
+        self.floor_clear_seconds = float(cfg["monster_detect"].get("floor_clear_seconds", 1.2))
 
         # Frame data
         self.frame = None               # Raw captured frame
@@ -1578,6 +1580,17 @@ class MonsterDetector:
     # Main processing loop
     # -------------------------------------------------------------------
 
+    def _waiting_for_floor_clear(self, floor, observed_at):
+        if floor != self.floor_pending_clear or floor is None:
+            return False
+        if self.floor_empty_since is None:
+            self.floor_empty_since = observed_at
+            return True
+        if observed_at < self.floor_empty_since + self.floor_clear_seconds:
+            return True
+        self.floor_pending_clear = self.floor_empty_since = None
+        return False
+
     def run_once(self) -> int:
         """
         Process a single game frame.
@@ -1595,6 +1608,7 @@ class MonsterDetector:
         # Capture frame
         self.img_frame = self.get_img_frame()
         if self.img_frame is None:
+            self.floor_empty_since = None
             if self.ladder_nav:
                 if self.ladder_nav.grabbing:
                     logger.warning("[Ladder] Frame capture failed during traversal; sending stop")
@@ -1788,7 +1802,13 @@ class MonsterDetector:
         ladder_command = None
         if self.ladder_nav:
             now = time.monotonic()
+            observed_at = self.frame_time if self.frame_time is not None else now
+            if floor is None or floor != self.floor_pending_clear:
+                self.floor_empty_since = None
+                if floor is not None:
+                    self.floor_pending_clear = None
             if self.cfg["bot"]["mode"] != "hunt" or (self._kb and self._kb.input_status != "Ready"):
+                self.floor_empty_since = None
                 self.ladder_nav.reset()
             elif self.player_feet is None or self.platform_offset is None:
                 if self.platform_offset is None and not self.ladder_nav.climb_protected(now):
@@ -1820,12 +1840,13 @@ class MonsterDetector:
                 elif floor and (same_floor or local_attack):
                     self.ladder_nav.reset()
                     self.floor_pending_clear = floor
+                    self.floor_empty_since = None
                     self.attack_targets = local_attack
                     approach = self.survey.approach_direction(self.player_feet, self.platform_offset,
                                                               same_floor, self.loc_player, reach_x, reach_y)
-                elif floor and floor == self.floor_pending_clear:
-                    # One full-screen miss can be a ghost changing animation.
-                    self.floor_pending_clear = None
+                elif self._waiting_for_floor_clear(floor, observed_at):
+                    # No live target to attack. Stay here while fresh full scans
+                    # confirm that the last ghost wasn't hidden by a hit effect.
                     self.attack_targets = []
                     approach = "none"
                 elif self.ladder_nav.edge and ladder_command is None:
