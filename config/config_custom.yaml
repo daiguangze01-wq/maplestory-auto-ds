@@ -2,7 +2,7 @@ bot:
   mode: "hunt" # detect = 只检测不攻击, hunt
   pickup_interval: 0           # 0 表示关闭脚本自动拾取
   chase_visible: true           # 幽灵地图全屏找怪，沿当前平台接近可攻击目标
-  jump_attack: true
+  jump_attack: false            # 单攻和群攻直接按住 S
   jump_attack_interval: 0.65   # 两次起跳之间的最短秒数
   attack: "directional"
   map: "north_forest_2"

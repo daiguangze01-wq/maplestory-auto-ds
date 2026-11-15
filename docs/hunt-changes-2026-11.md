@@ -26,7 +26,7 @@
 | 跳攻节奏 | 点 `C` 约 80 ms，再点 `S` 约 60 ms，两次攻击起跳至少间隔 650 ms |
 | 高台居中 | 默认和组队守台模式下，偏离平台中心超过 20 像素时先按住朝内的方向键，再跳攻，出招后松开。怪在外侧时先向内起跳，空中转身出招。中心附近原地攻击，地面和铁轨沿用原走位。 |
 
-早期版本曾在目标进入射程时持续按住攻击键。当前配置启用了 `bot.jump_attack`，所以连续看到目标时会重复执行上述 `C`、`S` 序列。[状态机](../src/engine/CharacterFSM.py) · [按键执行](../src/input/KeyBoardController.py)
+上述跳攻节奏对应本次记录的版本。后续配置已关闭 `bot.jump_attack`，单攻和群攻现在直接按住 `S`，目标离开射程时松开。[运行配置](../config/config_custom.yaml) · [按键执行](../src/input/KeyBoardController.py)
 
 ## 换层与爬梯保护
 
