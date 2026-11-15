@@ -510,7 +510,8 @@ class KeyBoardController():
                         # The input lock covers the lead and C tap. Carry this
                         # same deadline into subsequent ticks after the tap.
                         protect_until = time.monotonic() + CLIMB_PROTECTION_SECONDS
-                        time.sleep(0.007)
+                        # Give the game time to sample Up before the jump begins.
+                        time.sleep(0.060)
                         if (self._command[2] == "stop" or not self.press_key_safe(
                                 self.cfg["key"]["jump"], 0.03, "ladder jump")):
                             self.release_all_key("stop command or ladder jump not sent")

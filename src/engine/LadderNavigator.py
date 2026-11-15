@@ -5,6 +5,7 @@ from itertools import count
 from src.engine.CharacterFSM import Command
 
 CLIMB_PROTECTION_SECONDS = 1.2
+TRAVERSAL_RETRY_SECONDS = 1.0
 
 
 class LadderNavigator:
@@ -34,7 +35,7 @@ class LadderNavigator:
 
     def avoid_current(self, now):
         if self.edge:
-            self.retry_after[(self.edge["from"], self.edge["x"])] = now + 30
+            self.retry_after[(self.edge["from"], self.edge["x"])] = now + TRAVERSAL_RETRY_SECONDS
         self.reset()
 
     def missing_position(self, now):
@@ -201,7 +202,7 @@ class LadderNavigator:
         elif floor != edge["from"]:
             self.reset()
             return None
-        elif abs(launch_dx) <= (12 if dropping else 44):
+        elif abs(launch_dx) <= (12 if dropping else 70):
             if not dropping and abs(launch_dx) > grab_radius:
                 self.grab_direction = "right" if dx > 0 else "left"
             self.launch_distance = abs(dx)
