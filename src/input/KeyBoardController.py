@@ -507,14 +507,16 @@ class KeyBoardController():
                                 or not self._apply_holds(horizontal, "up", "none")):
                             self.release_all_key("grab entry cancelled or key transition failed")
                             return False
+                        # The input lock covers the lead and C tap. Carry this
+                        # same deadline into subsequent ticks after the tap.
+                        protect_until = time.monotonic() + CLIMB_PROTECTION_SECONDS
                         time.sleep(0.007)
-                        takeoff = time.monotonic()
                         if (self._command[2] == "stop" or not self.press_key_safe(
                                 self.cfg["key"]["jump"], 0.03, "ladder jump")):
                             self.release_all_key("stop command or ladder jump not sent")
                             return False
                         self._last_action = action
-                        self._climb_until = takeoff + CLIMB_PROTECTION_SECONDS
+                        self._climb_until = protect_until
                         logger.info(f"[LadderInput] Jump sent with Up held; horizontal={horizontal}")
                     if self._command[2] != "stop" and self.is_game_window_active():
                         return self._hold_ladder(time.monotonic())

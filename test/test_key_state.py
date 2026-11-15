@@ -161,9 +161,12 @@ class KeyStateTrackerTest(unittest.TestCase):
 
     def test_attack_and_other_commands_cannot_interrupt_first_1200ms(self):
         self.kb.cfg["key"]["jump"] = "c"
-        with patch.object(kbc.time, "monotonic", return_value=1), patch.object(
-                kbc.time, "sleep", side_effect=lambda _: self.kb.set_command("none none attack")):
-            self.tick("right none grab_ladder")
+        with patch.object(kbc.time, "monotonic", return_value=1) as clock:
+            def during_grab(duration):
+                clock.return_value += duration
+                self.kb.set_command("none none attack")
+            with patch.object(kbc.time, "sleep", side_effect=during_grab):
+                self.tick("right none grab_ladder")
         with patch.object(kbc.time, "monotonic", return_value=2.199):
             for command in ("left none none", "none none attack", "none none drop_through", "none none none"):
                 self.tick(command)
