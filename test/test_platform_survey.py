@@ -138,6 +138,26 @@ class PlatformSurveyTest(unittest.TestCase):
             detector.run_once()
             self.assertEqual(detector._kb.set_command.call_args.args, ("face_right none attack",))
 
+    def test_title_and_minimap_loss_triggers_recovery_until_position_returns(self):
+        for single in (False, True):
+            d = MonsterDetector(dict(self.detector.cfg, single_platform=single))
+            d.load_monster_images()
+            d.get_img_frame = Mock(return_value=self.frame)
+            d._kb = Mock(input_status="Ready")
+            with patch.object(d.survey, "scan", return_value=[]):
+                d.run_once()
+                with patch.object(d, "_detect_player_by_title"), patch.object(
+                        d.survey, "minimap_feet", return_value=None) as minimap:
+                    for stamp, expected in ((1, "none none none"), (1.2, "none none none"),
+                                            (1.31, "left none recover_position")):
+                        d.frame_time = stamp
+                        d.run_once()
+                        self.assertEqual(d._kb.set_command.call_args.args, (expected,))
+                    minimap.return_value = (430, 380)
+                    d.run_once()
+                    self.assertEqual(d.position_source, "minimap")
+                    self.assertEqual(d._kb.set_command.call_args.args, ("none none none",))
+
     def test_attack_steps_toward_current_ledge_center_in_both_hunt_modes(self):
         for single in (True, False):
             d = MonsterDetector(dict(self.detector.cfg, single_platform=single))

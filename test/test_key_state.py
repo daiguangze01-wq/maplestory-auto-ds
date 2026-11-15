@@ -70,6 +70,22 @@ class KeyStateTrackerTest(unittest.TestCase):
         kbc.key_up("left")
         self.assertEqual(kbc.get_pressed_keys(), ["up"])
 
+    def test_missing_position_walk_is_bounded_and_cancellable(self):
+        with patch.object(kbc.time, "monotonic") as clock:
+            clock.return_value = 1
+            self.tick("none none attack")
+            self.tick("left none recover_position")
+            self.assertEqual(self.kb.pressed_keys(), ["left"])
+            for now in (1.25, 2, 3):
+                clock.return_value = now
+                self.tick("left none recover_position")
+                self.assertEqual(self.kb.pressed_keys(), [])
+            self.tick("none none none")
+            self.tick("left none recover_position")
+            self.tick("none none attack")
+            self.assertEqual(self.kb.pressed_keys(), ["x"])
+            self.assertEqual(self.events.count(("down", "left")), 2)
+
     def test_repeated_key_down_keeps_single_entry(self):
         kbc.key_down("left")
         kbc.key_down("left")
@@ -168,7 +184,8 @@ class KeyStateTrackerTest(unittest.TestCase):
             with patch.object(kbc.time, "sleep", side_effect=during_grab):
                 self.tick("right none grab_ladder")
         with patch.object(kbc.time, "monotonic", return_value=2.199):
-            for command in ("left none none", "none none attack", "none none drop_through", "none none none"):
+            for command in ("left none none", "none none attack", "none none drop_through",
+                            "left none recover_position", "none none none"):
                 self.tick(command)
                 self.assertEqual(self.kb.pressed_keys(), ["up"])
             self.assertFalse(self.kb.press_key_safe("z"))

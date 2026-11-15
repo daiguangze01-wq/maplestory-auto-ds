@@ -69,6 +69,8 @@ class MonsterDetector:
         self.platform_offset = None
         self.player_feet = None
         self.locked_platform = None
+        self._last_located_floor = None
+        self._position_lost_since = None
         self.floor_pending_clear = None
         self.floor_empty_since = None
         self.floor_clear_seconds = float(cfg["monster_detect"].get("floor_clear_seconds", 1.2))
@@ -1608,6 +1610,8 @@ class MonsterDetector:
         # Capture frame
         self.img_frame = self.get_img_frame()
         if self.img_frame is None:
+            self._position_lost_since = None
+            self._last_located_floor = None
             self.floor_empty_since = None
             if self.ladder_nav:
                 if self.ladder_nav.grabbing:
@@ -1856,6 +1860,22 @@ class MonsterDetector:
                     upper = {dest for dest in other_floors if platforms[dest][2] < platforms[floor][2]}
                     ladder_command = self.ladder_nav.tick(floor, position, upper or other_floors, now,
                                                           coarse_position=coarse_position, frame_time=self.frame_time)
+        if self.position_source is not None or self.platform_offset is None:
+            self._last_located_floor = floor
+        recover_position = False
+        on_locked_platform = (single_platform and self.locked_platform is not None
+                              and self._last_located_floor == self.locked_platform)
+        if (self.cfg["bot"].get("mode") == "hunt" and not self.cfg.get("observe")
+                and (self.chase_visible or on_locked_platform)
+                and self.position_source is None and self.platform_offset is not None
+                and self.cfg.get("title", {}).get("enable", True) and ladder_command is None
+                and self._kb and self._kb.input_status == "Ready"):
+            stamp = self.frame_time if self.frame_time is not None else time.monotonic()
+            if self._position_lost_since is None:
+                self._position_lost_since = stamp
+            recover_position = stamp - self._position_lost_since >= 0.3
+        else:
+            self._position_lost_since = None
         perception = Perception(
             mode=self.cfg["bot"].get("mode", "detect"),
             attack_style=self.cfg["bot"]["attack"],
@@ -1872,6 +1892,7 @@ class MonsterDetector:
             chase_visible=self.chase_visible,
             approach_direction=approach,
             ladder_command=ladder_command,
+            recover_position=recover_position,
             platform_center_direction=(self.survey.attack_step(floor, self.player_feet, self.platform_offset)
                                        if floor and self.attack_targets else None),
         )

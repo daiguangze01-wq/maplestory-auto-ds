@@ -52,6 +52,7 @@ class Perception:
     approach_direction: str = "none"
     ladder_command: Optional[Command] = None
     platform_center_direction: Optional[str] = None
+    recover_position: bool = False
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,9 @@ class CharacterFSM:
         if p.mode == "hunt" and p.chase_visible and not p.single_platform and p.ladder_command:
             self._advance_state(p.ladder_command.state)
             return p.ladder_command
+        if p.mode == "hunt" and p.recover_position:
+            self._advance_state("RECOVER_POSITION")
+            return Command(move_x="left", action="recover_position", state=self.state)
         move_x, move_y, action = "none", "none", "none"
         attack_step = None
         route_move_x, route_move_y = "none", "none"

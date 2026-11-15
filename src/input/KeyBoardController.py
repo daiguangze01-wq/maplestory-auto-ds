@@ -156,6 +156,7 @@ class KeyBoardController():
         self._last_face = None
         self._last_action = None
         self._climb_until = 0.0
+        self._recovery_walk_until = 0.0
         self._up_pressed_at = None
         self._ladder_side_until = 0.0
         self.jump_attack = cfg["bot"].get("jump_attack", False)
@@ -470,6 +471,14 @@ class KeyBoardController():
                 if now < self._climb_until:
                     return self._hold_ladder(now)
                 self._climb_until = 0.0
+
+            if self._command[2] == "recover_position":
+                now = time.monotonic()
+                if self._last_action != "recover_position":
+                    self._recovery_walk_until = now + 0.25
+                    self._last_action = "recover_position"
+                direction = "left" if now < self._recovery_walk_until else "none"
+                return self._apply_holds(direction, "none", "none")
 
             for i, buff_key in enumerate(self.buff_keys):
                 cooldown = self.buff_cooldowns[i] if i < len(self.buff_cooldowns) else 60
