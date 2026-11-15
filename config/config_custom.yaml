@@ -68,7 +68,7 @@ monster_detect:
   # monsters: ["OrangeMushroom2"]
   mode: "color"                     # color / grayscale / contour_only
   diff_thres: 0.10                  # 幽灵模板匹配阈值（越小越严格）
-  scales: [1.0]                     # 模板采自 1280 宽的检测画面
+  scales: [1.0]                     # GMS v83 大幽灵素材已按 1280 宽检测画面缩放至原图的 93.75%
   display_scale: 0.47               # 监视器缩放 0.1~1.0（越小越流畅）
   detection_interval: 1             # 每帧更新可攻击目标，目标消失即停手
   with_enemy_hp_bar: false          # 仅按幽灵外观计数
